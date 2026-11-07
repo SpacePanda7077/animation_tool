@@ -1,0 +1,493 @@
+import { Scene, Math as PMath, GameObjects } from "phaser";
+import { rect_config } from "../configuration";
+import type { Grid } from "../../grid";
+import type { Bone, BoneAttachment } from "./Bone";
+
+type Mode = "scale" | "rotate";
+type Drag =
+    | { type: "scale"; hx: number; hy: number }
+    | { type: "rotate"; lastAngle: number }
+    | { type: "pivot" }
+    | {
+          type: "move";
+          offX: number;
+          offY: number;
+          startX: number;
+          startY: number;
+          moved: boolean;
+      }
+    | null;
+
+export class Rect implements BoneAttachment {
+    scene: Scene;
+    rect: Phaser.GameObjects.Rectangle;
+
+    // Pivot is stored relative to the rect (in fractions of width/height from
+    // the center, so 0,0 = center). That keeps it attached to the rect when
+    // the rect is scaled, and `pivot` always holds its current world position.
+    pivotNorm = new PMath.Vector2(0, 0);
+    pivot = new PMath.Vector2();
+    pivotIndicator: Phaser.GameObjects.Arc;
+
+    offset = 5;
+    minSize = 10;
+
+    /** Set to a Grid to enable snapping: hold Ctrl while moving / scaling / dragging the pivot. */
+    grid: Grid | null = null;
+    /** true = always snap (Ctrl then does nothing) */
+    snapAlways = false;
+
+    private static count = 0;
+    /** hidden rects are not drawn and can't be selected */
+    hidden = false;
+    readonly type = "Rectangle";
+    readonly name = `Rectangle ${++Rect.count}`;
+
+    /** bone that controls this rect (null = free). Position/rotation are stored relative to it. */
+    parentBone: Bone | null = null;
+    private localX = 0;
+    private localY = 0;
+    private localRot = 0;
+    private following = false;
+
+    /** UI hooks: numbers changed / selected (true) or deselected (false) */
+    onChange: ((r: Rect) => void) | null = null;
+    onSelect: ((selected: boolean) => void) | null = null;
+
+    scaleIndicators: GameObjects.Rectangle[] = [];
+    rotateIndicators: GameObjects.Rectangle[] = [];
+    private scaleDirs: [number, number][] = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+    ];
+    private rotateDirs: [number, number][] = [
+        [-1, -1],
+        [1, -1],
+        [-1, 1],
+        [1, 1],
+    ];
+
+    clicks = -1;
+    click = -1;
+    mode: Mode | null = null;
+    private drag: Drag = null;
+
+    constructor(scene: Scene, config: rect_config) {
+        this.scene = scene;
+        this.rect = this.scene.add
+            .rectangle(
+                config.x,
+                config.y,
+                config.width,
+                config.height,
+                config.color,
+            )
+            .setInteractive()
+            .on("pointerdown", (p: Phaser.Input.Pointer) => {
+                this.drag = {
+                    type: "move",
+                    offX: this.rect.x - p.worldX,
+                    offY: this.rect.y - p.worldY,
+                    startX: p.worldX,
+                    startY: p.worldY,
+                    moved: false,
+                };
+            });
+
+        this.pivotIndicator = this.scene.add
+            .circle(0, 0, 4, 0xfff000)
+            .setDepth(11)
+            .setInteractive()
+            .setVisible(false)
+            .on("pointerdown", () => {
+                this.drag = { type: "pivot" };
+            });
+
+        this.addScaleIndicator();
+        this.addRotateIndicator();
+        this.updateHandles();
+
+        this.scene.input.on("pointermove", (p: Phaser.Input.Pointer) =>
+            this.onMove(p),
+        );
+        this.scene.input.on("pointerup", () => this.onUp());
+        // click on empty space -> deselect
+        this.scene.input.on(
+            "pointerdown",
+            (
+                _p: Phaser.Input.Pointer,
+                over: Phaser.GameObjects.GameObject[],
+            ) => {
+                if (this.mode === null) return;
+                const mine: Phaser.GameObjects.GameObject[] = [
+                    this.rect,
+                    this.pivotIndicator,
+                    ...this.scaleIndicators,
+                    ...this.rotateIndicators,
+                ];
+                if (!over.some((o) => mine.includes(o))) this.deselect();
+            },
+        );
+    }
+
+    private onUp() {
+        const d = this.drag;
+        this.drag = null;
+        // a press on the rect without dragging counts as a click
+        if (d && d.type === "move" && !d.moved) this.handleClicks();
+    }
+
+    deselect() {
+        this.mode = null;
+        this.clicks = -1;
+        this.click = -1;
+        this.drag = null;
+        this.hideAll();
+        this.onSelect?.(false);
+    }
+
+    // ---------- coordinate helpers ----------
+
+    /** local (rect space, display units, relative to center) -> world */
+    private localToWorld(lx: number, ly: number) {
+        const r = this.rect.rotation;
+        const c = Math.cos(r);
+        const s = Math.sin(r);
+        return new PMath.Vector2(
+            this.rect.x + lx * c - ly * s,
+            this.rect.y + lx * s + ly * c,
+        );
+    }
+
+    /** world -> local (rect space, display units, relative to center) */
+    private worldToLocal(wx: number, wy: number) {
+        const r = this.rect.rotation;
+        const c = Math.cos(r);
+        const s = Math.sin(r);
+        const dx = wx - this.rect.x;
+        const dy = wy - this.rect.y;
+        return new PMath.Vector2(dx * c + dy * s, -dx * s + dy * c);
+    }
+
+    // ---------- handle creation ----------
+
+    addScaleIndicator() {
+        for (const [hx, hy] of this.scaleDirs) {
+            const i = this.scene.add
+                .rectangle(0, 0, 6, 6, 0xfff000)
+                .setDepth(10)
+                .setInteractive()
+                .setVisible(false)
+                .on("pointerdown", () => {
+                    this.drag = { type: "scale", hx, hy };
+                });
+            this.scaleIndicators.push(i);
+        }
+    }
+
+    addRotateIndicator() {
+        for (const [hx, hy] of this.rotateDirs) {
+            const i = this.scene.add
+                .rectangle(0, 0, 8, 8, 0xff0000)
+                .setDepth(10)
+                .setInteractive()
+                .setVisible(false)
+                .on("pointerdown", (p: Phaser.Input.Pointer) => {
+                    this.drag = {
+                        type: "rotate",
+                        lastAngle: Math.atan2(
+                            p.worldY - this.pivot.y,
+                            p.worldX - this.pivot.x,
+                        ),
+                    };
+                });
+            this.rotateIndicators.push(i);
+        }
+    }
+
+    // ---------- layout ----------
+
+    /** Reposition all handles + pivot to match the rect's transform. */
+    updateHandles() {
+        // if you move/rotate/scale an attached rect yourself, remember the new offset from its bone
+        if (this.parentBone && !this.following) this.syncLocal();
+
+        const w = this.rect.displayWidth;
+        const h = this.rect.displayHeight;
+
+        const place = (obj: GameObjects.Rectangle, hx: number, hy: number) => {
+            const p = this.localToWorld(
+                hx * (w / 2 + this.offset),
+                hy * (h / 2 + this.offset),
+            );
+            obj.setPosition(p.x, p.y).setRotation(this.rect.rotation);
+        };
+
+        this.scaleIndicators.forEach((o, i) => place(o, ...this.scaleDirs[i]));
+        this.rotateIndicators.forEach((o, i) =>
+            place(o, ...this.rotateDirs[i]),
+        );
+
+        const pw = this.localToWorld(
+            this.pivotNorm.x * w,
+            this.pivotNorm.y * h,
+        );
+        this.pivot.copy(pw);
+        this.pivotIndicator.setPosition(pw.x, pw.y);
+        this.onChange?.(this);
+    }
+
+    // ---------- setters used by the inspector ----------
+
+    // ---------- bone attachment ----------
+
+    /** Make `bone` control this rect. The rect stays where it is (keep offset) and then follows the bone. */
+    attach(bone: Bone) {
+        if (this.parentBone) this.parentBone.removeAttachment(this);
+        this.parentBone = bone;
+        bone.addAttachment(this);
+        this.syncLocal();
+    }
+
+    /** Stop following the bone; the rect stays where it is. */
+    detach() {
+        if (!this.parentBone) return;
+        this.parentBone.removeAttachment(this);
+        this.parentBone = null;
+        this.onChange?.(this);
+    }
+
+    /** store position/rotation relative to the bone's pivot + angle */
+    private syncLocal() {
+        const b = this.parentBone;
+        if (!b) return;
+        const a = b.angle;
+        const c = Math.cos(a);
+        const s = Math.sin(a);
+        const dx = this.rect.x - b.pivot.x;
+        const dy = this.rect.y - b.pivot.y;
+        this.localX = dx * c + dy * s;
+        this.localY = -dx * s + dy * c;
+        this.localRot = this.rect.rotation - a;
+    }
+
+    /** called by the bone whenever it moves or rotates */
+    followBone() {
+        const b = this.parentBone;
+        if (!b) return;
+        const a = b.angle;
+        const c = Math.cos(a);
+        const s = Math.sin(a);
+        this.rect.setPosition(
+            b.pivot.x + this.localX * c - this.localY * s,
+            b.pivot.y + this.localX * s + this.localY * c,
+        );
+        this.rect.setRotation(a + this.localRot);
+        this.following = true;
+        this.updateHandles();
+        this.following = false;
+    }
+
+    get visible() {
+        return !this.hidden;
+    }
+
+    /** show / hide the rect (a hidden rect is deselected and can't be clicked) */
+    setVisible(v: boolean) {
+        this.hidden = !v;
+        this.rect.setVisible(v);
+        if (!v) this.deselect();
+        this.onChange?.(this);
+    }
+
+    get selected() {
+        return this.mode !== null;
+    }
+
+    select() {
+        if (this.mode === null) this.handleClicks();
+    }
+
+    /** move the rect's center */
+    setPosition(x: number, y: number) {
+        this.rect.setPosition(x, y);
+        this.updateHandles();
+    }
+
+    setSize(w: number, h: number) {
+        this.rect.setScale(
+            Math.max(this.minSize, w) / this.rect.width,
+            Math.max(this.minSize, h) / this.rect.height,
+        );
+        this.updateHandles();
+    }
+
+    /** rotate to an absolute angle (degrees), turning around the pivot */
+    setRotationDeg(deg: number) {
+        const delta = PMath.DegToRad(deg) - this.rect.rotation;
+        const pv = this.pivot.clone();
+        const dx = this.rect.x - pv.x;
+        const dy = this.rect.y - pv.y;
+        const cos = Math.cos(delta);
+        const sin = Math.sin(delta);
+        this.rect.setPosition(
+            pv.x + dx * cos - dy * sin,
+            pv.y + dx * sin + dy * cos,
+        );
+        this.rect.rotation += delta;
+        this.updateHandles();
+    }
+
+    /** world position of the pivot */
+    setPivotWorld(x: number, y: number) {
+        const local = this.worldToLocal(x, y);
+        this.pivotNorm.set(
+            local.x / this.rect.displayWidth,
+            local.y / this.rect.displayHeight,
+        );
+        this.updateHandles();
+    }
+
+    setColor(color: number) {
+        this.rect.setFillStyle(color);
+        this.onChange?.(this);
+    }
+
+    /** layer depth (used by the layers list); handles stay just above their own layer */
+    setLayer(depth: number) {
+        this.rect.setDepth(depth);
+        this.scaleIndicators.forEach((o) => o.setDepth(depth + 5));
+        this.rotateIndicators.forEach((o) => o.setDepth(depth + 5));
+        this.pivotIndicator.setDepth(depth + 6);
+    }
+
+    // ---------- interaction ----------
+
+    handleClicks() {
+        if (this.hidden) return;
+        this.clicks++;
+        const click = this.clicks % 2;
+        this.click = click;
+        this.hideAll();
+        if (click === 0) {
+            this.mode = "scale";
+            this.unhideScaleIndicator();
+        } else {
+            this.mode = "rotate";
+            this.unhideRotateIndicator();
+        }
+        this.onSelect?.(true);
+    }
+
+    private onMove(p: Phaser.Input.Pointer) {
+        if (!this.drag) return;
+        if (this.drag.type === "move") this.doMove(this.drag, p);
+        else if (this.drag.type === "scale")
+            this.doScale(this.drag.hx, this.drag.hy, p);
+        else if (this.drag.type === "rotate") this.doRotate(p);
+        else if (this.drag.type === "pivot") this.doPivot(p);
+        this.updateHandles();
+    }
+
+    private snapPt(x: number, y: number, p: Phaser.Input.Pointer) {
+        const ctrl = (p.event as MouseEvent | undefined)?.ctrlKey ?? false;
+        if (!this.grid || !(ctrl || this.snapAlways)) return { x, y };
+        return { x: this.grid.snap(x), y: this.grid.snap(y) };
+    }
+
+    /** Drag the whole rect (after a small threshold so clicks still register). */
+    private doMove(
+        d: Extract<Drag, { type: "move" }>,
+        p: Phaser.Input.Pointer,
+    ) {
+        if (this.mode === null) return; // only movable while selected
+        if (!d.moved) {
+            if (Math.hypot(p.worldX - d.startX, p.worldY - d.startY) < 4)
+                return;
+            d.moved = true;
+        }
+        const s = this.snapPt(p.worldX + d.offX, p.worldY + d.offY, p);
+        this.rect.setPosition(s.x, s.y); // snaps the rect's center
+    }
+
+    /** Scale from a handle; the opposite edge/corner stays fixed. */
+    private doScale(hx: number, hy: number, p: Phaser.Input.Pointer) {
+        const w = this.rect.displayWidth;
+        const h = this.rect.displayHeight;
+        const t = this.snapPt(p.worldX, p.worldY, p);
+        const local = this.worldToLocal(t.x, t.y);
+
+        let newW = w;
+        let newH = h;
+        let shiftX = 0;
+        let shiftY = 0;
+
+        if (hx !== 0) {
+            // anchor (fixed side) is at -hx * w/2 in local space
+            newW = Math.max(this.minSize, (local.x + (hx * w) / 2) * hx);
+            shiftX = (hx * (newW - w)) / 2;
+        }
+        if (hy !== 0) {
+            newH = Math.max(this.minSize, (local.y + (hy * h) / 2) * hy);
+            shiftY = (hy * (newH - h)) / 2;
+        }
+
+        // move center (using the OLD size/transform), then apply new scale
+        const c = this.localToWorld(shiftX, shiftY);
+        this.rect.setPosition(c.x, c.y);
+        this.rect.setScale(newW / this.rect.width, newH / this.rect.height);
+    }
+
+    /** Rotate the rect around the pivot's world position. */
+    private doRotate(p: Phaser.Input.Pointer) {
+        if (!this.drag || this.drag.type !== "rotate") return;
+        const pv = this.pivot.clone(); // pivot stays fixed in world space
+        const angle = Math.atan2(p.worldY - pv.y, p.worldX - pv.x);
+        const delta = angle - this.drag.lastAngle;
+        this.drag.lastAngle = angle;
+
+        const dx = this.rect.x - pv.x;
+        const dy = this.rect.y - pv.y;
+        const cos = Math.cos(delta);
+        const sin = Math.sin(delta);
+        this.rect.setPosition(
+            pv.x + dx * cos - dy * sin,
+            pv.y + dx * sin + dy * cos,
+        );
+        this.rect.rotation += delta;
+    }
+
+    /** Drag the pivot anywhere (inside or outside the rect). */
+    private doPivot(p: Phaser.Input.Pointer) {
+        const t = this.snapPt(p.worldX, p.worldY, p);
+        const local = this.worldToLocal(t.x, t.y);
+        this.pivotNorm.set(
+            local.x / this.rect.displayWidth,
+            local.y / this.rect.displayHeight,
+        );
+    }
+
+    // ---------- visibility ----------
+
+    hideAll() {
+        for (const s of this.scaleIndicators) s.setVisible(false);
+        for (const r of this.rotateIndicators) r.setVisible(false);
+        this.pivotIndicator.setVisible(false);
+    }
+    unhideScaleIndicator() {
+        this.updateHandles();
+        for (const s of this.scaleIndicators) s.setVisible(true);
+        this.pivotIndicator.setVisible(true);
+    }
+    unhideRotateIndicator() {
+        this.updateHandles();
+        for (const r of this.rotateIndicators) r.setVisible(true);
+        this.pivotIndicator.setVisible(true);
+    }
+}
