@@ -7,6 +7,7 @@ import {
     useAnimationStore,
     type Interp,
 } from "../../game/game-components/animation";
+import ExportDialog from "./ExportDialog";
 
 const NAME_W = 150; // width of the bone names column
 const PAD = 14; // space left / right of the frame range
@@ -29,6 +30,7 @@ export default function Timeline() {
     const [ppf, setPpf] = useState(14); // pixels per frame (Ctrl + wheel to zoom)
     const [dragDelta, setDragDelta] = useState(0);
     const [collapsed, setCollapsed] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
     const posing = mode === "pose";
     const cur = Math.round(frame);
@@ -218,6 +220,15 @@ export default function Timeline() {
                         <option value="smooth">Smooth</option>
                         <option value="step">Step</option>
                     </select>
+
+                    <span className="w-px h-5 bg-[#5a5555]" />
+
+                    <Btn
+                        title="Export the skeleton and the animation as a JSON file for your game"
+                        onClick={() => setExporting(true)}
+                    >
+                        ⭳ Export
+                    </Btn>
 
                     {!posing && (
                         <span className="text-xs text-[#ffd54f]">
@@ -483,6 +494,8 @@ export default function Timeline() {
                     </div>
                 )}
             </div>
+
+            {exporting && <ExportDialog onClose={() => setExporting(false)} />}
         </div>
     );
 }
@@ -578,3 +591,4 @@ function IntField({
         </label>
     );
 }
+
