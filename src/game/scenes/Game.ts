@@ -3,6 +3,7 @@ import { EventBus } from "../EventBus";
 import { ObjectBuilder } from "../game-components/objects/object-builder";
 import { EventHandler } from "../game-components/EventHandler/EventHandler";
 import { Grid } from "../game-components/grid";
+import { history } from "../game-components/history";
 
 export class Game extends Scene {
     objectBuilder: ObjectBuilder;
@@ -32,9 +33,14 @@ export class Game extends Scene {
         this.objectBuilder = new ObjectBuilder(this, this.grid);
         this.EventHandler = new EventHandler(this.objectBuilder);
         this.EventHandler.handleEvents();
+        history.init(this, this.objectBuilder);
         EventBus.emit("current-scene-ready", this);
 
-        this.events.on("shutdown", this.EventHandler.destroy);
-        this.events.on("destroy", this.EventHandler.destroy);
+        const cleanup = () => {
+            this.EventHandler.destroy();
+            history.destroy();
+        };
+        this.events.on("shutdown", cleanup);
+        this.events.on("destroy", cleanup);
     }
 }

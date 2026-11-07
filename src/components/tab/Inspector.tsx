@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { isRoot, Obj, useObjectsStore } from "../../store/object-store";
-import type { Rect } from "../../game/game-components/objects/objetcs/Rect";
+import { Rect } from "../../game/game-components/objects/objetcs/Rect";
+import { Bone } from "../../game/game-components/objects/objetcs/Bone";
 
 const fmt = (v: number) => String(Math.round(v * 100) / 100);
 /** wrap degrees into -180..180 for display */
@@ -34,7 +35,9 @@ function Layers() {
     const selected = useObjectsStore((s) => s.selected);
     const reorderRect = useObjectsStore((s) => s.reorderRect);
     const attachRect = useObjectsStore((s) => s.attachRect);
+    const reparentBone = useObjectsStore((s) => s.reparentBone);
     const unparent = useObjectsStore((s) => s.unparent);
+    const setup = useObjectsStore((s) => s.mode) === "setup"; // hierarchy edits are setup-only
     useObjectsStore((s) => s.version); // hierarchy / visibility changes bump the version
 
     const dragRef = useRef<Obj | null>(null);
@@ -48,16 +51,14 @@ function Layers() {
     };
 
     // bones first (they are always in front), then free rects in layer order
-    const rootBones = objects.filter((o) => o.type === "Bone" && isRoot(o));
-    const rootRects = objects.filter(
-        (o) => o.type === "Rectangle" && isRoot(o),
-    );
+    const rootBones = objects.filter((o) => o instanceof Bone && isRoot(o));
+    const rootRects = objects.filter((o) => o instanceof Rect && isRoot(o));
 
     /** things shown under a bone: child bones, then the rects it controls (front rect first) */
     const childrenOf = (o: Obj): Obj[] => {
-        if (o.type !== "Bone") return [];
-        const rects = (o.attachments as unknown as Rect[])
-            .slice()
+        if (!(o instanceof Bone)) return [];
+        const rects = o.attachments
+            .filter((a): a is Rect => a instanceof Rect)
             .sort((a, b) => objects.indexOf(a) - objects.indexOf(b));
         return [...o.children, ...rects];
     };
@@ -66,12 +67,21 @@ function Layers() {
         const d = dragRef.current;
         let zone: Zone | null = null;
 
-        if (d && d !== target && d.type === "Rectangle") {
-            if (target.type === "Bone") {
-                // drop a rect ON a bone to let the bone control it
-                if (d.parentBone !== target) zone = "inside";
-            } else {
-                // drop a rect above / below another rect to change the layer order
+        if (d && d !== target) {
+            if (target instanceof Bone) {
+                // drop a rect or a bone ON a bone to put it under that bone
+                if (setup) {
+                    if (d instanceof Rect && d.parentBone !== target)
+                        zone = "inside";
+                    else if (
+                        d instanceof Bone &&
+                        d.parent !== target &&
+                        !target.isDescendantOf(d)
+                    )
+                        zone = "inside";
+                }
+            } else if (d instanceof Rect) {
+                // drop a rect above / below another rect: layer order, and (setup) its bone group
                 const box = e.currentTarget.getBoundingClientRect();
                 zone =
                     (e.clientY - box.top) / box.height < 0.5
@@ -94,10 +104,15 @@ function Layers() {
         e.preventDefault();
         e.stopPropagation();
         const d = dragRef.current;
-        if (d && d.type === "Rectangle" && drop && drop.target === target) {
-            if (drop.zone === "inside" && target.type === "Bone")
-                attachRect(d, target);
-            else if (drop.zone !== "inside" && target.type === "Rectangle")
+        if (d && drop && drop.target === target) {
+            if (drop.zone === "inside" && target instanceof Bone) {
+                if (d instanceof Rect) attachRect(d, target);
+                else if (d instanceof Bone) reparentBone(d, target);
+            } else if (
+                drop.zone !== "inside" &&
+                d instanceof Rect &&
+                target instanceof Rect
+            )
                 reorderRect(d, target, drop.zone);
         }
         reset();
@@ -106,7 +121,7 @@ function Layers() {
     const renderNode = (o: Obj, depth: number): React.ReactNode => {
         const isDrop = drop?.target === o && dragging !== o;
         return (
-            <div key={o.name}>
+            <div key={o.id}>
                 <div
                     draggable
                     onClick={() => o.select()}
@@ -115,7 +130,7 @@ function Layers() {
                         dragRef.current = o;
                         setDragging(o);
                         e.dataTransfer.effectAllowed = "move";
-                        e.dataTransfer.setData("text/plain", o.name); // needed by Firefox
+                        e.dataTransfer.setData("text/plain", o.id); // needed by Firefox
                     }}
                     onDragOver={(e) => onDragOver(e, o)}
                     onDrop={(e) => onDrop(e, o)}
@@ -138,7 +153,7 @@ function Layers() {
                     ].join(" ")}
                 >
                     <span className="text-[#878080]">
-                        {o.type === "Bone" ? "🦴" : "▭"}
+                        {o instanceof Bone ? "🦴" : "▭"}
                     </span>
                     <span className="flex-1 truncate">{o.name}</span>
                     <button
@@ -160,14 +175,15 @@ function Layers() {
         );
     };
 
-    const dragNested = dragging !== null && !isRoot(dragging);
+    const dragNested = setup && dragging !== null && !isRoot(dragging);
 
     return (
         <div className="flex flex-col gap-1 min-h-full">
             <div className="text-xs text-[#878080] mb-1">
                 Bones are always in front. Rectangles: top = front, drag to
-                reorder. Drop a rectangle onto a bone to let the bone control
-                it.
+                reorder. In setup mode, drop a bone or rectangle onto a bone
+                to put it under that bone; dropping a rectangle above or below
+                another puts it in that one's group.
             </div>
             {rootBones.map((o) => renderNode(o, 0))}
             {rootRects.map((o) => renderNode(o, 0))}
@@ -179,7 +195,7 @@ function Layers() {
                     dragNested ? "border-2 border-dashed border-[#878080]" : "",
                 ].join(" ")}
                 onDragOver={(e) => {
-                    if (dragRef.current && !isRoot(dragRef.current)) {
+                    if (setup && dragRef.current && !isRoot(dragRef.current)) {
                         e.preventDefault();
                         setDrop(null);
                     }
@@ -187,7 +203,7 @@ function Layers() {
                 onDrop={(e) => {
                     e.preventDefault();
                     const d = dragRef.current;
-                    if (d && !isRoot(d)) unparent(d);
+                    if (setup && d && !isRoot(d)) unparent(d);
                     reset();
                 }}
             >
@@ -204,17 +220,18 @@ function Layers() {
 function Properties() {
     const selected = useObjectsStore((s) => s.selected);
     const unparent = useObjectsStore((s) => s.unparent);
+    const posing = useObjectsStore((s) => s.mode) === "pose";
     useObjectsStore((s) => s.version); // re-render whenever the game object changes
 
     if (!selected) {
         return <div className="text-xs text-[#878080]">Nothing selected.</div>;
     }
 
-    if (selected.type === "Bone") {
+    if (selected instanceof Bone) {
         const b = selected;
         return (
             <div className="flex flex-col gap-3">
-                <Title>{b.name}</Title>
+                <NameField key={b.id} value={b.name} onCommit={(v) => b.setName(v)} />
 
                 <Group label="Pivot (world)">
                     <NumberField
@@ -235,6 +252,7 @@ function Properties() {
                     <NumberField
                         label="Length"
                         value={b.length}
+                        disabled={posing} // length is locked in pose mode
                         onCommit={(v) => b.setLength(v)}
                     />
                     <NumberField
@@ -248,7 +266,7 @@ function Properties() {
                     <Group label="Relative to parent">
                         <NumberField
                             label="Angle °"
-                            value={wrapDeg(toDeg(b.rel))}
+                            value={wrapDeg(toDeg(b.relEff))}
                             onCommit={(v) => b.setRelativeAngleDeg(v)}
                         />
                     </Group>
@@ -280,8 +298,9 @@ function Properties() {
                 </Group>
 
                 <div className="text-[11px] text-[#878080]">
-                    E extrude · Shift+click multi-select · Ctrl+K parent ·
-                    Ctrl+D detach
+                    {posing
+                        ? "Pose: rotate and move only, length is locked"
+                        : "E extrude · Shift+click multi-select · Ctrl+K parent · Ctrl+D detach"}
                 </div>
             </div>
         );
@@ -291,13 +310,14 @@ function Properties() {
     const hex = r.rect.fillColor.toString(16).padStart(6, "0");
     return (
         <div className="flex flex-col gap-3">
-            <Title>{r.name}</Title>
+            <NameField key={r.id} value={r.name} onCommit={(v) => r.setName(v)} />
 
             {r.parentBone && (
                 <Group label="Controlled by">
                     <Info label="Bone" value={r.parentBone.name} />
                     <button
-                        className="self-end text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
+                        disabled={posing}
+                        className="self-end text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
                         onClick={() => unparent(r)}
                     >
                         Detach
@@ -309,11 +329,13 @@ function Properties() {
                 <NumberField
                     label="X"
                     value={r.rect.x}
+                    disabled={posing}
                     onCommit={(v) => r.setPosition(v, r.rect.y)}
                 />
                 <NumberField
                     label="Y"
                     value={r.rect.y}
+                    disabled={posing}
                     onCommit={(v) => r.setPosition(r.rect.x, v)}
                 />
             </Group>
@@ -322,11 +344,13 @@ function Properties() {
                 <NumberField
                     label="Width"
                     value={r.rect.displayWidth}
+                    disabled={posing}
                     onCommit={(v) => r.setSize(v, r.rect.displayHeight)}
                 />
                 <NumberField
                     label="Height"
                     value={r.rect.displayHeight}
+                    disabled={posing}
                     onCommit={(v) => r.setSize(r.rect.displayWidth, v)}
                 />
             </Group>
@@ -335,6 +359,7 @@ function Properties() {
                 <NumberField
                     label="Angle °"
                     value={wrapDeg(toDeg(r.rect.rotation))}
+                    disabled={posing}
                     onCommit={(v) => r.setRotationDeg(v)}
                 />
             </Group>
@@ -343,11 +368,13 @@ function Properties() {
                 <NumberField
                     label="X"
                     value={r.pivot.x}
+                    disabled={posing}
                     onCommit={(v) => r.setPivotWorld(v, r.pivot.y)}
                 />
                 <NumberField
                     label="Y"
                     value={r.pivot.y}
+                    disabled={posing}
                     onCommit={(v) => r.setPivotWorld(r.pivot.x, v)}
                 />
             </Group>
@@ -373,8 +400,55 @@ function Properties() {
 /* Small building blocks                                                */
 /* ------------------------------------------------------------------ */
 
-function Title({ children }: { children: React.ReactNode }) {
-    return <div className="text-white font-semibold">{children}</div>;
+/** Name input: Enter / click away to apply, Esc to cancel. */
+function NameField({
+    value,
+    onCommit,
+}: {
+    value: string;
+    onCommit: (v: string) => void;
+}) {
+    const [text, setText] = useState(value);
+    const editing = useRef(false);
+    const cancelled = useRef(false);
+
+    // while you are not typing, always show the live name
+    useEffect(() => {
+        if (!editing.current) setText(value);
+    });
+
+    const commit = () => {
+        editing.current = false;
+        if (cancelled.current) {
+            cancelled.current = false;
+            setText(value);
+            return;
+        }
+        if (text.trim()) onCommit(text);
+        else setText(value); // empty name: keep the old one
+    };
+
+    return (
+        <input
+            value={text}
+            spellCheck={false}
+            onChange={(e) => setText(e.target.value)}
+            onFocus={(e) => {
+                editing.current = true;
+                e.currentTarget.select();
+            }}
+            onBlur={commit}
+            onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") {
+                    cancelled.current = true;
+                    e.currentTarget.blur();
+                }
+                e.stopPropagation(); // don't let Phaser see typed keys (e.g. E extrudes a bone)
+            }}
+            className="bg-[#1f1d1d] text-white font-semibold rounded px-2 py-1 border border-[#5a5555] focus:border-[#ffd54f] outline-none"
+        />
+    );
 }
 
 function Group({

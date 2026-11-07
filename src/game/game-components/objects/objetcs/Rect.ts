@@ -3,6 +3,23 @@ import { rect_config } from "../configuration";
 import type { Grid } from "../../grid";
 import type { Bone, BoneAttachment } from "./Bone";
 
+/** plain-data copy of everything that defines a rect (used by undo / redo) */
+export type RectState = {
+    id: string;
+    name: string;
+    hidden: boolean;
+    parentBone: string | null;
+    /** setup placement (while posing: where it was placed in setup, not where the bone drives it) */
+    x: number;
+    y: number;
+    rot: number;
+    scaleX: number;
+    scaleY: number;
+    pivotX: number;
+    pivotY: number;
+    color: number;
+};
+
 type Mode = "scale" | "rotate";
 type Drag =
     | { type: "scale"; hx: number; hy: number }
@@ -40,15 +57,22 @@ export class Rect implements BoneAttachment {
     private static count = 0;
     /** hidden rects are not drawn and can't be selected */
     hidden = false;
-    readonly type = "Rectangle";
-    readonly name = `Rectangle ${++Rect.count}`;
+    /** false = removed from the scene (e.g. undo of a create), kept around so redo can bring it back */
+    alive = true;
+    /** never changes (used as React key / drag identity), unlike `name` */
+    readonly id = `rect-${++Rect.count}`;
+    /** shown in the layers list and the inspector; rename with setName */
+    name = `Rectangle ${Rect.count}`;
 
     /** bone that controls this rect (null = free). Position/rotation are stored relative to it. */
     parentBone: Bone | null = null;
     private localX = 0;
     private localY = 0;
     private localRot = 0;
-    private following = false;
+    /** pose mode: rects can't be edited, they only follow their bone */
+    locked = false;
+    /** where the rect was in setup mode, saved while posing so it can go back */
+    private setupPose: { x: number; y: number; rot: number } | null = null;
 
     /** UI hooks: numbers changed / selected (true) or deselected (false) */
     onChange: ((r: Rect) => void) | null = null;
@@ -215,9 +239,6 @@ export class Rect implements BoneAttachment {
 
     /** Reposition all handles + pivot to match the rect's transform. */
     updateHandles() {
-        // if you move/rotate/scale an attached rect yourself, remember the new offset from its bone
-        if (this.parentBone && !this.following) this.syncLocal();
-
         const w = this.rect.displayWidth;
         const h = this.rect.displayHeight;
 
@@ -247,7 +268,7 @@ export class Rect implements BoneAttachment {
 
     // ---------- bone attachment ----------
 
-    /** Make `bone` control this rect. The rect stays where it is (keep offset) and then follows the bone. */
+    /** Make `bone` control this rect. The rect stays where it is; it follows the bone in pose mode. */
     attach(bone: Bone) {
         if (this.parentBone) this.parentBone.removeAttachment(this);
         this.parentBone = bone;
@@ -261,6 +282,39 @@ export class Rect implements BoneAttachment {
         this.parentBone.removeAttachment(this);
         this.parentBone = null;
         this.onChange?.(this);
+    }
+
+    /** entering pose mode: remember the setup placement and bind to the bone's setup transform */
+    enterPose() {
+        if (!this.parentBone) return;
+        this.setupPose = {
+            x: this.rect.x,
+            y: this.rect.y,
+            rot: this.rect.rotation,
+        };
+        this.syncLocal(); // the bone is still in its setup pose here
+    }
+
+    /** back to setup mode: put the rect back where it was placed in setup */
+    exitPose() {
+        const sp = this.setupPose;
+        if (!sp) return;
+        this.setupPose = null;
+        this.rect.setPosition(sp.x, sp.y);
+        this.rect.setRotation(sp.rot);
+        this.updateHandles();
+    }
+
+    /** lock / unlock editing (locked while posing) */
+    setLocked(v: boolean) {
+        this.locked = v;
+        this.drag = null;
+        if (this.mode === null) return;
+        this.hideAll();
+        if (!v) {
+            if (this.click === 0) this.unhideScaleIndicator();
+            else this.unhideRotateIndicator();
+        }
     }
 
     /** store position/rotation relative to the bone's pivot + angle */
@@ -277,7 +331,7 @@ export class Rect implements BoneAttachment {
         this.localRot = this.rect.rotation - a;
     }
 
-    /** called by the bone whenever it moves or rotates */
+    /** called by the bone (pose mode only) whenever it moves or rotates */
     followBone() {
         const b = this.parentBone;
         if (!b) return;
@@ -289,13 +343,68 @@ export class Rect implements BoneAttachment {
             b.pivot.y + this.localX * s + this.localY * c,
         );
         this.rect.setRotation(a + this.localRot);
-        this.following = true;
         this.updateHandles();
-        this.following = false;
     }
 
     get visible() {
         return !this.hidden;
+    }
+
+    // ---------- undo / redo support ----------
+
+    snapshot(): RectState {
+        const sp = this.setupPose;
+        return {
+            id: this.id,
+            name: this.name,
+            hidden: this.hidden,
+            parentBone: this.parentBone ? this.parentBone.id : null,
+            x: sp ? sp.x : this.rect.x,
+            y: sp ? sp.y : this.rect.y,
+            rot: sp ? sp.rot : this.rect.rotation,
+            scaleX: this.rect.scaleX,
+            scaleY: this.rect.scaleY,
+            pivotX: this.pivotNorm.x,
+            pivotY: this.pivotNorm.y,
+            color: this.rect.fillColor,
+        };
+    }
+
+    /** put saved numbers back (hierarchy is handled by the caller; call in setup mode) */
+    restore(s: Omit<RectState, "id" | "parentBone">) {
+        this.name = s.name;
+        this.rect
+            .setPosition(s.x, s.y)
+            .setRotation(s.rot)
+            .setScale(s.scaleX, s.scaleY)
+            .setFillStyle(s.color);
+        this.pivotNorm.set(s.pivotX, s.pivotY);
+        this.hidden = s.hidden;
+        this.rect.setVisible(this.alive && !s.hidden);
+        if (s.hidden) this.deselect();
+        this.updateHandles();
+    }
+
+    /** take the rect out of the scene (it can be revived later) */
+    kill() {
+        if (!this.alive) return;
+        this.alive = false;
+        this.deselect();
+        this.rect.setVisible(false);
+    }
+
+    revive() {
+        if (this.alive) return;
+        this.alive = true;
+        this.rect.setVisible(!this.hidden);
+    }
+
+    /** rename (empty names are ignored) */
+    setName(v: string) {
+        const n = v.trim();
+        if (!n || n === this.name) return;
+        this.name = n;
+        this.onChange?.(this);
     }
 
     /** show / hide the rect (a hidden rect is deselected and can't be clicked) */
@@ -316,11 +425,13 @@ export class Rect implements BoneAttachment {
 
     /** move the rect's center */
     setPosition(x: number, y: number) {
+        if (this.locked) return;
         this.rect.setPosition(x, y);
         this.updateHandles();
     }
 
     setSize(w: number, h: number) {
+        if (this.locked) return;
         this.rect.setScale(
             Math.max(this.minSize, w) / this.rect.width,
             Math.max(this.minSize, h) / this.rect.height,
@@ -330,6 +441,7 @@ export class Rect implements BoneAttachment {
 
     /** rotate to an absolute angle (degrees), turning around the pivot */
     setRotationDeg(deg: number) {
+        if (this.locked) return;
         const delta = PMath.DegToRad(deg) - this.rect.rotation;
         const pv = this.pivot.clone();
         const dx = this.rect.x - pv.x;
@@ -346,6 +458,7 @@ export class Rect implements BoneAttachment {
 
     /** world position of the pivot */
     setPivotWorld(x: number, y: number) {
+        if (this.locked) return;
         const local = this.worldToLocal(x, y);
         this.pivotNorm.set(
             local.x / this.rect.displayWidth,
@@ -370,23 +483,24 @@ export class Rect implements BoneAttachment {
     // ---------- interaction ----------
 
     handleClicks() {
-        if (this.hidden) return;
+        if (this.hidden || !this.alive) return;
         this.clicks++;
         const click = this.clicks % 2;
         this.click = click;
         this.hideAll();
+        // locked (pose mode): still selectable, but no handles to edit with
         if (click === 0) {
             this.mode = "scale";
-            this.unhideScaleIndicator();
+            if (!this.locked) this.unhideScaleIndicator();
         } else {
             this.mode = "rotate";
-            this.unhideRotateIndicator();
+            if (!this.locked) this.unhideRotateIndicator();
         }
         this.onSelect?.(true);
     }
 
     private onMove(p: Phaser.Input.Pointer) {
-        if (!this.drag) return;
+        if (!this.drag || this.locked) return;
         if (this.drag.type === "move") this.doMove(this.drag, p);
         else if (this.drag.type === "scale")
             this.doScale(this.drag.hx, this.drag.hy, p);

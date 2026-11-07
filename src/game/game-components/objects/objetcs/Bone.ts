@@ -1,9 +1,36 @@
 import { Scene, GameObjects, Input, Math as PMath } from "phaser";
 import type { Grid } from "../../grid";
 
+/**
+ * setup = build the skeleton: bones can move, change length and change hierarchy,
+ *         attached objects stay where they are (they don't follow the bones).
+ * pose  = bones can only rotate and move (length is locked, no hierarchy edits),
+ *         attached objects follow their bones.
+ */
+export type BoneMode = "setup" | "pose";
+
+/** plain-data copy of everything that defines a bone (used by undo / redo) */
+export type BoneState = {
+    id: string;
+    name: string;
+    hidden: boolean;
+    parent: string | null;
+    children: string[];
+    connected: boolean;
+    baseX: number;
+    baseY: number;
+    offX: number;
+    offY: number;
+    rel: number;
+    length: number;
+    poseRel: number;
+    poseX: number;
+    poseY: number;
+};
+
 /** Anything that can follow a bone: Rect now, a Sprite/Image class later. */
 export interface BoneAttachment {
-    /** called every time the bone moves / rotates; update your world transform from the bone */
+    /** called (in pose mode only) every time the bone moves / rotates; update your world transform from the bone */
     followBone(): void;
 }
 
@@ -30,12 +57,19 @@ export class Bone {
     /** bones are always drawn in front of everything (they don't take part in layering) */
     static readonly DEPTH = 100000;
 
-    readonly type = "Bone";
-    readonly name = `Bone ${++Bone.count}`;
+    /** current mode for every bone; switch it through the store's setMode so objects get prepared too */
+    static mode: BoneMode = "setup";
+
+    /** never changes (used as React key / drag identity), unlike `name` */
+    readonly id = `bone-${++Bone.count}`;
+    /** shown in the layers list and the inspector; rename with setName */
+    name = `Bone ${Bone.count}`;
     /** things (rects, images...) that follow this bone */
     attachments: BoneAttachment[] = [];
     /** hidden bones are not drawn and can't be selected */
     hidden = false;
+    /** false = removed from the scene (e.g. undo of a create), kept around so redo can bring it back */
+    alive = true;
 
     private static snapPoint(x: number, y: number, p: Input.Pointer) {
         const ctrl = (p.event as MouseEvent | undefined)?.ctrlKey ?? false;
@@ -67,6 +101,18 @@ export class Bone {
     /** angle relative to the parent (or the world angle for a root bone) */
     rel = 0;
 
+    /** setup position of a ROOT bone's pivot (world). Child bones get theirs from the parent. */
+    baseX = 0;
+    baseY = 0;
+
+    /**
+     * Pose offsets, only applied in pose mode (setup values are never touched by posing):
+     * poseRel = extra rotation, poseX/poseY = extra translation (parent's frame, world for a root).
+     */
+    poseRel = 0;
+    poseX = 0;
+    poseY = 0;
+
     constructor(
         scene: Scene,
         x = 0,
@@ -77,6 +123,8 @@ export class Bone {
         this.scene = scene;
         this.length = length;
         this.parent = parent;
+        this.baseX = x;
+        this.baseY = y;
         if (parent) parent.children.push(this);
 
         this.graphics = scene.add.graphics().setDepth(Bone.DEPTH);
@@ -108,32 +156,20 @@ export class Bone {
         this.pivot.on(
             "drag",
             (p: Input.Pointer, rawX: number, rawY: number) => {
-                if (!this.isSelected) return;
-                const { x: dragX, y: dragY } = Bone.snapPoint(rawX, rawY, p);
-                if (!this.parent) {
-                    // root: move the whole chain
-                    this.pivot.setPosition(dragX, dragY);
-                } else if (!this.connected) {
-                    // offset child: change its offset from the parent
-                    const pa = this.parent.angle;
-                    const dx = dragX - this.parent.pivot.x;
-                    const dy = dragY - this.parent.pivot.y;
-                    this.offX = dx * Math.cos(pa) + dy * Math.sin(pa);
-                    this.offY = -dx * Math.sin(pa) + dy * Math.cos(pa);
-                } else {
-                    return; // connected pivots are glued to the parent's tip
-                }
-                this.layout();
+                if (!this.isSelected || !this.canMovePivot) return;
+                const { x, y } = Bone.snapPoint(rawX, rawY, p);
+                this.movePivotTo(x, y);
             },
         );
 
-        // dragging the pole controls BOTH the angle and the length
+        // dragging the pole controls the angle, and the length too (setup mode only)
         this.poll.on("drag", (p: Input.Pointer) => {
             if (!this.isSelected) return;
             const t = Bone.snapPoint(p.worldX, p.worldY, p);
             const dx = t.x - this.pivot.x;
             const dy = t.y - this.pivot.y;
-            this.length = Math.max(this.minLength, Math.hypot(dx, dy));
+            if (!this.posing)
+                this.length = Math.max(this.minLength, Math.hypot(dx, dy));
             this.angle = Math.atan2(dy, dx);
             this.layout();
         });
@@ -156,10 +192,23 @@ export class Bone {
 
     /** World angle in radians (0 = pointing right). Children inherit their parent's rotation. */
     get angle(): number {
-        return this.parent ? this.parent.angle + this.rel : this.rel;
+        const base = this.parent ? this.parent.angle : 0;
+        return base + this.relEff;
     }
+    /** in setup mode this edits the setup angle, in pose mode only the pose offset */
     set angle(v: number) {
-        this.rel = this.parent ? v - this.parent.angle : v;
+        const r = v - (this.parent ? this.parent.angle : 0);
+        if (this.posing) this.poseRel = r - this.rel;
+        else this.rel = r;
+    }
+
+    get posing() {
+        return Bone.mode === "pose";
+    }
+
+    /** angle relative to the parent as it is right now (setup + pose offset when posing) */
+    get relEff(): number {
+        return this.rel + (this.posing ? this.poseRel : 0);
     }
 
     get angleDeg() {
@@ -261,6 +310,87 @@ export class Bone {
         return !this.hidden;
     }
 
+    // ---------- undo / redo support ----------
+
+    snapshot(): BoneState {
+        return {
+            id: this.id,
+            name: this.name,
+            hidden: this.hidden,
+            parent: this.parent ? this.parent.id : null,
+            children: this.children.filter((c) => c.alive).map((c) => c.id),
+            connected: this.connected,
+            baseX: this.baseX,
+            baseY: this.baseY,
+            offX: this.offX,
+            offY: this.offY,
+            rel: this.rel,
+            length: this.length,
+            poseRel: this.poseRel,
+            poseX: this.poseX,
+            poseY: this.poseY,
+        };
+    }
+
+    /** put the saved numbers + hierarchy back (call layout() on the roots afterwards) */
+    restore(s: BoneState, get: (id: string) => Bone | undefined) {
+        this.name = s.name;
+        this.hidden = s.hidden;
+        this.connected = s.connected;
+        this.baseX = s.baseX;
+        this.baseY = s.baseY;
+        this.offX = s.offX;
+        this.offY = s.offY;
+        this.rel = s.rel;
+        this.length = s.length;
+        this.poseRel = s.poseRel;
+        this.poseX = s.poseX;
+        this.poseY = s.poseY;
+        this.parent = s.parent ? (get(s.parent) ?? null) : null;
+        this.children = s.children
+            .map(get)
+            .filter((c): c is Bone => c !== undefined);
+        if (this.alive) {
+            this.graphics.setVisible(!this.hidden);
+            this.body.setVisible(!this.hidden);
+        }
+    }
+
+    /** take the bone out of the scene (it can be revived later) */
+    kill() {
+        if (!this.alive) return;
+        this.alive = false;
+        if (this.isSelected) {
+            const rest = [...Bone.selection].filter((b) => b !== this);
+            Bone.setSelection(
+                rest,
+                Bone.active === this
+                    ? (rest[rest.length - 1] ?? null)
+                    : Bone.active,
+            );
+        }
+        this.graphics.setVisible(false);
+        this.body.setVisible(false);
+        this.pivot.setVisible(false);
+        this.poll.setVisible(false);
+    }
+
+    revive() {
+        if (this.alive) return;
+        this.alive = true;
+        this.graphics.setVisible(!this.hidden);
+        this.body.setVisible(!this.hidden);
+        this.refresh();
+    }
+
+    /** rename (empty names are ignored) */
+    setName(v: string) {
+        const n = v.trim();
+        if (!n || n === this.name) return;
+        this.name = n;
+        Bone.onChange?.(this);
+    }
+
     /** show / hide the bone (a hidden bone is deselected and can't be clicked) */
     setVisible(v: boolean) {
         this.hidden = !v;
@@ -274,12 +404,14 @@ export class Bone {
         Bone.onChange?.(this);
     }
 
-    /** root bones and offset children can be moved; a connected child is glued to its parent's tip */
+    /** setup: root bones and offset children can be moved. pose: every bone can be moved. */
     get canMovePivot() {
-        return !this.parent || !this.connected;
+        return this.posing || !this.parent || !this.connected;
     }
 
+    /** length can only change in setup mode */
     setLength(v: number) {
+        if (this.posing) return;
         this.length = Math.max(this.minLength, v);
         this.layout();
     }
@@ -292,28 +424,67 @@ export class Bone {
 
     /** angle relative to the parent in degrees (same as world angle for a root bone) */
     setRelativeAngleDeg(deg: number) {
-        this.rel = PMath.DegToRad(deg);
+        const r = PMath.DegToRad(deg);
+        if (this.posing) this.poseRel = r - this.rel;
+        else this.rel = r;
         this.layout();
     }
 
     /** world position of the pivot */
     setPivot(x: number, y: number) {
-        if (!this.parent) {
-            this.pivot.setPosition(x, y);
+        if (!this.canMovePivot) return;
+        this.movePivotTo(x, y);
+    }
+
+    /**
+     * Move the pivot to a world position.
+     * setup: changes the setup pose (root: base position, offset child: offset from the parent).
+     * pose:  changes only the pose translation, the setup pose stays as it was.
+     */
+    private movePivotTo(wx: number, wy: number) {
+        const p = this.parent;
+        if (this.posing) {
+            if (!p) {
+                this.poseX = wx - this.baseX;
+                this.poseY = wy - this.baseY;
+            } else {
+                const pa = p.angle;
+                const c = Math.cos(pa);
+                const s = Math.sin(pa);
+                const ax = this.connected ? p.poll.x : p.pivot.x;
+                const ay = this.connected ? p.poll.y : p.pivot.y;
+                const dx = wx - ax;
+                const dy = wy - ay;
+                const lx = dx * c + dy * s;
+                const ly = -dx * s + dy * c;
+                this.poseX = lx - (this.connected ? 0 : this.offX);
+                this.poseY = ly - (this.connected ? 0 : this.offY);
+            }
+        } else if (!p) {
+            this.baseX = wx;
+            this.baseY = wy;
         } else if (!this.connected) {
-            const pa = this.parent.angle;
-            const dx = x - this.parent.pivot.x;
-            const dy = y - this.parent.pivot.y;
+            const pa = p.angle;
+            const dx = wx - p.pivot.x;
+            const dy = wy - p.pivot.y;
             this.offX = dx * Math.cos(pa) + dy * Math.sin(pa);
             this.offY = -dx * Math.sin(pa) + dy * Math.cos(pa);
         } else {
-            return;
+            return; // connected pivots are glued to the parent's tip
         }
         this.layout();
     }
 
+    /** forget the pose of this bone (back to the setup pose) */
+    resetPose() {
+        this.poseRel = 0;
+        this.poseX = 0;
+        this.poseY = 0;
+    }
+
     /** Create a connected child at this bone's tip (continuing in the same direction) and select it. */
     extrude() {
+        if (Bone.mode !== "setup") return null;
         const child = this.createChild();
         Bone.setSelection([child]);
         return child;
@@ -321,6 +492,7 @@ export class Bone {
 
     /** E: extrude from every selected bone; the new bones become the selection. */
     static extrudeSelected() {
+        if (Bone.mode !== "setup") return;
         const kids = [...Bone.selection].map((b) => b.createChild());
         if (kids.length) Bone.setSelection(kids);
     }
@@ -330,28 +502,40 @@ export class Bone {
      * they stay exactly where they are, but from now on follow the active bone.
      */
     static parentSelectedToActive() {
+        if (Bone.mode !== "setup") return;
         const target = Bone.active;
         if (!target) return;
-        for (const b of Bone.selection) {
-            if (b === target || target.isDescendantOf(b)) continue; // no cycles
-
-            const worldAngle = b.angle;
-            const pa = target.angle;
-            const dx = b.pivot.x - target.pivot.x;
-            const dy = b.pivot.y - target.pivot.y;
-
-            if (b.parent)
-                b.parent.children = b.parent.children.filter((c) => c !== b);
-            b.parent = target;
-            target.children.push(b);
-
-            b.connected = false;
-            b.offX = dx * Math.cos(pa) + dy * Math.sin(pa);
-            b.offY = -dx * Math.sin(pa) + dy * Math.cos(pa);
-            b.angle = worldAngle; // keep the same world angle
-            b.layout();
-        }
+        for (const b of Bone.selection) b.parentTo(target);
         Bone.onStructureChange?.();
+    }
+
+    /**
+     * Make this bone a child of `target`, KEEPING OFFSET (it stays where it is and follows `target` from now on).
+     * Returns false when nothing changed (not in setup mode, onto itself, or it would make a cycle).
+     */
+    parentTo(target: Bone): boolean {
+        if (Bone.mode !== "setup") return false;
+        if (this === target || target.isDescendantOf(this)) return false; // no cycles
+
+        const worldAngle = this.angle;
+        const pa = target.angle;
+        const dx = this.pivot.x - target.pivot.x;
+        const dy = this.pivot.y - target.pivot.y;
+
+        if (this.parent)
+            this.parent.children = this.parent.children.filter(
+                (c) => c !== this,
+            );
+        this.parent = target;
+        target.children.push(this);
+
+        this.connected = false;
+        this.resetPose();
+        this.offX = dx * Math.cos(pa) + dy * Math.sin(pa);
+        this.offY = -dx * Math.sin(pa) + dy * Math.cos(pa);
+        this.angle = worldAngle; // keep the same world angle
+        this.layout();
+        return true;
     }
 
     /** Ctrl+D: detach selected bones from their parent. They stay put and start their own hierarchy. */
@@ -362,13 +546,16 @@ export class Bone {
     /** Cut this bone (and its own children) out of the hierarchy so it becomes the root of its own. */
     disconnect() {
         const p = this.parent;
-        if (!p) return;
+        if (!p || this.posing) return;
         const worldAngle = this.angle; // read while the parent still exists
         p.children = p.children.filter((c) => c !== this);
         this.parent = null;
         this.connected = true;
         this.offX = 0;
         this.offY = 0;
+        this.baseX = this.pivot.x; // a root's position is stored in base, so keep where it is now
+        this.baseY = this.pivot.y;
+        this.resetPose();
         this.angle = worldAngle; // no parent now, so rel becomes the world angle
         this.layout(); // pivot stays where it is; children follow
         Bone.onStructureChange?.();
@@ -383,19 +570,23 @@ export class Bone {
     }
 
     private layoutTree() {
+        const pose = this.posing;
         const p = this.parent;
         if (p) {
-            if (this.connected) {
-                this.pivot.setPosition(p.poll.x, p.poll.y);
-            } else {
-                const pa = p.angle;
-                const c = Math.cos(pa);
-                const s = Math.sin(pa);
-                this.pivot.setPosition(
-                    p.pivot.x + this.offX * c - this.offY * s,
-                    p.pivot.y + this.offX * s + this.offY * c,
-                );
-            }
+            // anchor = parent's tip (connected) or parent's pivot (offset); then add offset + pose translation
+            const pa = p.angle;
+            const c = Math.cos(pa);
+            const s = Math.sin(pa);
+            const ax = this.connected ? p.poll.x : p.pivot.x;
+            const ay = this.connected ? p.poll.y : p.pivot.y;
+            const lx = (this.connected ? 0 : this.offX) + (pose ? this.poseX : 0);
+            const ly = (this.connected ? 0 : this.offY) + (pose ? this.poseY : 0);
+            this.pivot.setPosition(ax + lx * c - ly * s, ay + lx * s + ly * c);
+        } else {
+            this.pivot.setPosition(
+                this.baseX + (pose ? this.poseX : 0),
+                this.baseY + (pose ? this.poseY : 0),
+            );
         }
         const a = this.angle;
         this.poll.setPosition(
@@ -403,13 +594,14 @@ export class Bone {
             this.pivot.y + Math.sin(a) * this.length,
         );
         this.drawBone();
-        for (const a of this.attachments) a.followBone();
+        // attached objects only follow the bone in pose mode
+        if (pose) for (const a of this.attachments) a.followBone();
         for (const c of this.children) c.layoutTree();
     }
 
     /** Show handles only while selected. */
     refresh() {
-        const s = this.isSelected && !this.hidden;
+        const s = this.isSelected && !this.hidden && this.alive;
         this.pivot.setVisible(s);
         this.poll.setVisible(s);
         this.drawBone();

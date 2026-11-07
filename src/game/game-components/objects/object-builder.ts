@@ -3,15 +3,23 @@ import { rect_config } from "./configuration";
 import { Rect } from "./objetcs/Rect";
 import { Bone } from "./objetcs/Bone";
 import { Grid } from "../grid";
-import { useObjectsStore } from "../../../store/object-store";
+import { useObjectsStore, type Obj } from "../../../store/object-store";
 
 export class ObjectBuilder {
     scene: Scene;
     grid: Grid;
+    /** every object ever made in this scene (also removed ones), so undo / redo can bring the same instance back */
+    registry = new Map<string, Obj>();
     constructor(scene: Scene, grid: Grid) {
         this.scene = scene;
         this.grid = grid;
         Bone.grid = this.grid;
+
+        // fresh start for this scene (static / store state outlives a restarted game)
+        Bone.mode = "setup";
+        Bone.selection.clear();
+        Bone.active = null;
+        useObjectsStore.setState({ objects: [], selected: null, mode: "setup" });
 
         // keep the React inspector in sync with bone changes / selection / hierarchy
         Bone.onChange = () => useObjectsStore.getState().bump();
@@ -26,7 +34,7 @@ export class ObjectBuilder {
             useObjectsStore.getState().refreshLayers();
     }
 
-    rect(config: rect_config) {
+    rect(config: rect_config): Rect {
         const rect = new Rect(this.scene, config);
         rect.grid = this.grid;
 
@@ -38,6 +46,7 @@ export class ObjectBuilder {
         };
 
         this.addToObjects(rect);
+        return rect;
     }
 
     bone() {
@@ -45,6 +54,7 @@ export class ObjectBuilder {
     }
 
     addToObjects(obj: Rect | Bone) {
+        this.registry.set(obj.id, obj);
         const objects = useObjectsStore.getState().objects;
         const new_obj = [obj, ...objects];
         useObjectsStore.getState().setObjects(new_obj);
