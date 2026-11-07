@@ -1,5 +1,6 @@
 import { Scene, GameObjects, Input, Math as PMath } from "phaser";
 import type { Grid } from "../../grid";
+import { IKConstraint } from "../../ik";
 
 /**
  * setup = build the skeleton: bones can move, change length and change hierarchy,
@@ -157,14 +158,20 @@ export class Bone {
             "drag",
             (p: Input.Pointer, rawX: number, rawY: number) => {
                 if (!this.isSelected || !this.canMovePivot) return;
+                // IK-driven bones cannot be moved manually in pose mode
+                if (this.posing && IKConstraint.isLocked(this)) return;
                 const { x, y } = Bone.snapPoint(rawX, rawY, p);
                 this.movePivotTo(x, y);
+                // After moving a bone that is an IK chain root / parent, re-sync IKs
+                if (this.posing) IKConstraint.syncAll();
             },
         );
 
         // dragging the pole controls the angle, and the length too (setup mode only)
         this.poll.on("drag", (p: Input.Pointer) => {
             if (!this.isSelected) return;
+            // IK-driven bones cannot be rotated manually in pose mode
+            if (this.posing && IKConstraint.isLocked(this)) return;
             const t = Bone.snapPoint(p.worldX, p.worldY, p);
             const dx = t.x - this.pivot.x;
             const dy = t.y - this.pivot.y;
@@ -172,6 +179,7 @@ export class Bone {
                 this.length = Math.max(this.minLength, Math.hypot(dx, dy));
             this.angle = Math.atan2(dy, dx);
             this.layout();
+            if (this.posing) IKConstraint.syncAll();
         });
 
         Bone.initScene(scene);
@@ -404,8 +412,9 @@ export class Bone {
         Bone.onChange?.(this);
     }
 
-    /** setup: root bones and offset children can be moved. pose: every bone can be moved. */
+    /** setup: root bones and offset children can be moved. pose: every bone can be moved (except IK-locked). */
     get canMovePivot() {
+        if (this.posing && IKConstraint.isLocked(this)) return false;
         return this.posing || !this.parent || !this.connected;
     }
 
@@ -418,16 +427,20 @@ export class Bone {
 
     /** world angle in degrees */
     setAngleDeg(deg: number) {
+        if (this.posing && IKConstraint.isLocked(this)) return;
         this.angle = PMath.DegToRad(deg);
         this.layout();
+        if (this.posing) IKConstraint.syncAll();
     }
 
     /** angle relative to the parent in degrees (same as world angle for a root bone) */
     setRelativeAngleDeg(deg: number) {
+        if (this.posing && IKConstraint.isLocked(this)) return;
         const r = PMath.DegToRad(deg);
         if (this.posing) this.poseRel = r - this.rel;
         else this.rel = r;
         this.layout();
+        if (this.posing) IKConstraint.syncAll();
     }
 
     /** world position of the pivot */
@@ -579,8 +592,10 @@ export class Bone {
             const s = Math.sin(pa);
             const ax = this.connected ? p.poll.x : p.pivot.x;
             const ay = this.connected ? p.poll.y : p.pivot.y;
-            const lx = (this.connected ? 0 : this.offX) + (pose ? this.poseX : 0);
-            const ly = (this.connected ? 0 : this.offY) + (pose ? this.poseY : 0);
+            const lx =
+                (this.connected ? 0 : this.offX) + (pose ? this.poseX : 0);
+            const ly =
+                (this.connected ? 0 : this.offY) + (pose ? this.poseY : 0);
             this.pivot.setPosition(ax + lx * c - ly * s, ay + lx * s + ly * c);
         } else {
             this.pivot.setPosition(
@@ -640,3 +655,4 @@ export class Bone {
             .setScale(this.length / 100, 1);
     }
 }
+

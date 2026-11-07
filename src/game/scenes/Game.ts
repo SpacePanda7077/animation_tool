@@ -5,11 +5,15 @@ import { EventHandler } from "../game-components/EventHandler/EventHandler";
 import { Grid } from "../game-components/grid";
 import { history } from "../game-components/history";
 import { animation } from "../game-components/animation";
+import { IKConstraint, addIKFromSelection } from "../game-components/ik";
+import { useObjectsStore } from "../../store/object-store";
 
 export class Game extends Scene {
     objectBuilder: ObjectBuilder;
     EventHandler: EventHandler;
     grid: Grid;
+    private unsubMode: (() => void) | null = null;
+
     constructor() {
         super("Game");
     }
@@ -78,14 +82,37 @@ export class Game extends Scene {
         this.EventHandler.handleEvents();
         animation.init(this, this.objectBuilder);
         history.init(this, this.objectBuilder);
+
+        // IK: create from UI, refresh handles on mode change
+        EventBus.on("add-ik", () => {
+            const ik = addIKFromSelection(this);
+            if (ik) {
+                useObjectsStore.getState().bump();
+            }
+        });
+        EventBus.on("delete-ik", (id: string) => {
+            const c = IKConstraint.all.find((x) => x.id === id);
+            c?.destroy();
+            useObjectsStore.getState().bump();
+        });
+        this.unsubMode = useObjectsStore.subscribe((s, prev) => {
+            if (s.mode !== prev.mode) IKConstraint.refreshAll();
+        });
+
         EventBus.emit("current-scene-ready", this);
 
         const cleanup = () => {
             this.EventHandler.destroy();
             animation.destroy();
             history.destroy();
+            IKConstraint.destroyAll();
+            EventBus.off("add-ik");
+            EventBus.off("delete-ik");
+            this.unsubMode?.();
+            this.unsubMode = null;
         };
         this.events.on("shutdown", cleanup);
         this.events.on("destroy", cleanup);
     }
 }
+

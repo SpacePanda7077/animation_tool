@@ -29,22 +29,32 @@ export type AnimData = {
     tracks: Tracks;
 };
 
+const DEFAULT_ANIM: AnimData = {
+    fps: 24,
+    end: 60,
+    loop: true,
+    tracks: {},
+};
+
 type AnimStore = AnimData & {
     /** playhead; fractional while playing, whole when you scrub */
     frame: number;
     playing: boolean;
     /** selected keys, see keyId() */
     selected: string[];
+    /** name of the currently active animation */
+    currentName: string;
+    /** all named animations (working state is always mirrored into this for the current one) */
+    animations: Record<string, AnimData>;
 };
 
 export const useAnimationStore = create<AnimStore>(() => ({
-    fps: 24,
-    end: 60,
-    loop: true,
-    tracks: {},
+    ...DEFAULT_ANIM,
     frame: 0,
     playing: false,
     selected: [],
+    currentName: "idle",
+    animations: { idle: { ...DEFAULT_ANIM, tracks: {} } },
 }));
 
 export const keyId = (boneId: string, frame: number) => `${boneId}|${frame}`;
@@ -58,6 +68,13 @@ const copyTracks = (t: Tracks): Tracks => {
     for (const id of Object.keys(t)) out[id] = t[id].map((k) => ({ ...k }));
     return out;
 };
+
+const copyAnimData = (d: AnimData): AnimData => ({
+    fps: d.fps,
+    end: d.end,
+    loop: d.loop,
+    tracks: copyTracks(d.tracks),
+});
 
 /** insert / replace the key at key.frame, keeping the list sorted */
 const putKey = (keys: Key[], key: Key): Key[] =>
@@ -90,6 +107,7 @@ export function sample(
 
 /**
  * Keyframe animation for the bones' POSE (so pose mode only).
+ * Supports multiple named animations.
  *  - Pose a bone, press I (or the Key button): every selected bone gets a key on the current frame.
  *  - Moving the playhead (or playing) sets the pose of every animated bone; the rects follow as usual.
  *  - Frame changes / playback are not undo steps. Inserting, deleting and moving keys are.
@@ -134,15 +152,15 @@ class Animation {
         this.destroy();
         this.scene = scene;
         this.builder = builder;
-        // a fresh scene starts with an empty animation
+        // a fresh scene starts with a single empty "idle" animation
+        const empty = copyAnimData(DEFAULT_ANIM);
         useAnimationStore.setState({
-            fps: 24,
-            end: 60,
-            loop: true,
-            tracks: {},
+            ...empty,
             frame: 0,
             playing: false,
             selected: [],
+            currentName: "idle",
+            animations: { idle: empty },
         });
         this.unsubscribe = useObjectsStore.subscribe((s, prev) => {
             if (s.mode === prev.mode) return;
@@ -159,6 +177,147 @@ class Animation {
         this.scene?.input?.keyboard?.off("keydown", this.onKey);
         this.scene = null;
         this.builder = null;
+    }
+
+    // ---------- multi-animation management ----------
+
+    /** Persist the current working state into the animations map. */
+    private saveCurrent() {
+        const st = useAnimationStore.getState();
+        const data: AnimData = {
+            fps: st.fps,
+            end: st.end,
+            loop: st.loop,
+            tracks: copyTracks(st.tracks),
+        };
+        useAnimationStore.setState({
+            animations: { ...st.animations, [st.currentName]: data },
+        });
+    }
+
+    /** Load a named animation into the working state (does not change currentName). */
+    private loadIntoWorking(name: string) {
+        const st = useAnimationStore.getState();
+        const data = st.animations[name] ?? copyAnimData(DEFAULT_ANIM);
+        useAnimationStore.setState({
+            fps: data.fps,
+            end: data.end,
+            loop: data.loop,
+            tracks: copyTracks(data.tracks),
+            frame: 0,
+            playing: false,
+            selected: [],
+        });
+        this.apply();
+    }
+
+    /** Switch to another animation (saves the current one first). */
+    switchTo(name: string) {
+        const st = useAnimationStore.getState();
+        if (name === st.currentName || !st.animations[name]) return;
+        this.stop();
+        this.saveCurrent();
+        useAnimationStore.setState({ currentName: name });
+        this.loadIntoWorking(name);
+        this.touch();
+    }
+
+    /** Create a new empty animation and switch to it. */
+    create(name?: string) {
+        this.stop();
+        this.saveCurrent();
+        const st = useAnimationStore.getState();
+        let base = (name?.trim() || "anim").replace(/\s+/g, " ");
+        if (!base) base = "anim";
+        let finalName = base;
+        let i = 2;
+        while (st.animations[finalName]) {
+            finalName = `${base} ${i++}`;
+        }
+        const empty = copyAnimData(DEFAULT_ANIM);
+        useAnimationStore.setState({
+            animations: { ...st.animations, [finalName]: empty },
+            currentName: finalName,
+            ...empty,
+            frame: 0,
+            playing: false,
+            selected: [],
+        });
+        this.apply();
+        this.touch();
+        return finalName;
+    }
+
+    /** Duplicate the current animation under a new name and switch to the copy. */
+    duplicate(name?: string) {
+        this.stop();
+        this.saveCurrent();
+        const st = useAnimationStore.getState();
+        const src = st.animations[st.currentName] ?? copyAnimData(DEFAULT_ANIM);
+        let base = (name?.trim() || `${st.currentName} copy`).replace(
+            /\s+/g,
+            " ",
+        );
+        if (!base) base = `${st.currentName} copy`;
+        let finalName = base;
+        let i = 2;
+        while (st.animations[finalName]) {
+            finalName = `${base} ${i++}`;
+        }
+        const copy = copyAnimData(src);
+        useAnimationStore.setState({
+            animations: { ...st.animations, [finalName]: copy },
+            currentName: finalName,
+            ...copy,
+            frame: 0,
+            playing: false,
+            selected: [],
+        });
+        this.apply();
+        this.touch();
+        return finalName;
+    }
+
+    /** Rename the current animation. Returns the final name (or null on failure). */
+    rename(newName: string): string | null {
+        const st = useAnimationStore.getState();
+        const name = newName.trim().replace(/\s+/g, " ");
+        if (!name || name === st.currentName) return st.currentName;
+        if (st.animations[name]) return null; // name already taken
+        this.saveCurrent();
+        const { [st.currentName]: data, ...rest } = st.animations;
+        useAnimationStore.setState({
+            animations: { ...rest, [name]: data },
+            currentName: name,
+        });
+        this.touch();
+        return name;
+    }
+
+    /** Delete an animation. Cannot delete the last one. Switches to another if deleting current. */
+    delete(name?: string) {
+        const st = useAnimationStore.getState();
+        const target = name ?? st.currentName;
+        const names = Object.keys(st.animations);
+        if (names.length <= 1 || !st.animations[target]) return false;
+        this.stop();
+        const { [target]: _, ...rest } = st.animations;
+        const nextName =
+            target === st.currentName ? Object.keys(rest)[0] : st.currentName;
+        useAnimationStore.setState({
+            animations: rest,
+            currentName: nextName,
+        });
+        if (target === st.currentName) {
+            this.loadIntoWorking(nextName);
+        }
+        this.touch();
+        return true;
+    }
+
+    /** List of animation names (stable order). */
+    list(): string[] {
+        return Object.keys(useAnimationStore.getState().animations);
     }
 
     // ---------- playhead / playback ----------
@@ -243,6 +402,7 @@ class Animation {
         useAnimationStore.setState({
             fps: Math.min(240, Math.max(1, Math.round(v))),
         });
+        this.saveCurrent();
         this.touch();
     }
 
@@ -252,11 +412,13 @@ class Animation {
             end,
             frame: Math.min(s.frame, end),
         }));
+        this.saveCurrent();
         this.touch();
     }
 
     setLoop(v: boolean) {
         useAnimationStore.setState({ loop: v });
+        this.saveCurrent();
         this.touch();
     }
 
@@ -370,11 +532,11 @@ class Animation {
         const st = useAnimationStore.getState();
         if (!st.selected.length) return;
         const sel = new Set(st.selected);
-        const tracks = copyTracks(st.tracks);
-        for (const bid of Object.keys(tracks)) {
-            for (const k of tracks[bid]) {
-                if (sel.has(keyId(bid, k.frame))) k.interp = interp;
-            }
+        const tracks: Tracks = {};
+        for (const bid of Object.keys(st.tracks)) {
+            tracks[bid] = st.tracks[bid].map((k) =>
+                sel.has(keyId(bid, k.frame)) ? { ...k, interp } : { ...k },
+            );
         }
         this.commit(tracks, st.selected);
     }
@@ -432,6 +594,7 @@ class Animation {
             selected,
             frame: Math.min(st.frame, d.end),
         });
+        this.saveCurrent();
         this.apply();
     }
 
@@ -439,6 +602,7 @@ class Animation {
 
     private commit(tracks: Tracks, selected: string[]) {
         useAnimationStore.setState({ tracks, selected });
+        this.saveCurrent();
         this.touch();
         this.apply();
     }

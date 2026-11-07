@@ -7,6 +7,7 @@ import {
     useAnimationStore,
     type Interp,
 } from "../../game/game-components/animation";
+import { EventBus } from "../../game/EventBus";
 import ExportDialog from "./ExportDialog";
 
 const NAME_W = 150; // width of the bone names column
@@ -24,14 +25,26 @@ export default function Timeline() {
     const mode = useObjectsStore((s) => s.mode);
     const objects = useObjectsStore((s) => s.objects);
     useObjectsStore((s) => s.version); // selection / names / hierarchy changes
-    const { fps, end, frame, playing, loop, tracks, selected } =
-        useAnimationStore();
+    const {
+        fps,
+        end,
+        frame,
+        playing,
+        loop,
+        tracks,
+        selected,
+        currentName,
+        animations,
+    } = useAnimationStore();
 
     const [ppf, setPpf] = useState(14); // pixels per frame (Ctrl + wheel to zoom)
     const [dragDelta, setDragDelta] = useState(0);
     const [collapsed, setCollapsed] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [renaming, setRenaming] = useState(false);
+    const [renameValue, setRenameValue] = useState("");
 
+    const animNames = Object.keys(animations);
     const posing = mode === "pose";
     const cur = Math.round(frame);
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -113,6 +126,83 @@ export default function Timeline() {
                         {collapsed ? "▸" : "▾"}
                     </Btn>
                     <span className="text-white font-semibold">Timeline</span>
+
+                    {/* ---------- multi-animation controls ---------- */}
+                    <span className="w-px h-5 bg-[#5a5555]" />
+                    {renaming ? (
+                        <input
+                            autoFocus
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === "Enter") {
+                                    const result =
+                                        animation.rename(renameValue);
+                                    if (result) setRenaming(false);
+                                } else if (e.key === "Escape") {
+                                    setRenaming(false);
+                                }
+                            }}
+                            onBlur={() => {
+                                const result = animation.rename(renameValue);
+                                if (result) setRenaming(false);
+                                else setRenaming(false);
+                            }}
+                            className="bg-[#1f1d1d] text-white text-xs rounded px-2 py-1 border border-[#ffd54f] outline-none w-28"
+                            title="Enter to confirm, Esc to cancel"
+                        />
+                    ) : (
+                        <select
+                            title="Switch animation"
+                            value={currentName}
+                            onChange={(e) => animation.switchTo(e.target.value)}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            className="bg-[#1f1d1d] text-white text-xs rounded px-1.5 py-1 border border-[#5a5555] max-w-[140px]"
+                        >
+                            {animNames.map((n) => (
+                                <option key={n} value={n}>
+                                    {n}
+                                </option>
+                            ))}
+                        </select>
+                    )}
+                    <Btn
+                        title="New empty animation"
+                        onClick={() => animation.create()}
+                    >
+                        + New
+                    </Btn>
+                    <Btn
+                        title="Duplicate current animation"
+                        onClick={() => animation.duplicate()}
+                    >
+                        ⧉ Dup
+                    </Btn>
+                    <Btn
+                        title="Rename current animation"
+                        onClick={() => {
+                            setRenameValue(currentName);
+                            setRenaming(true);
+                        }}
+                    >
+                        ✎
+                    </Btn>
+                    <Btn
+                        title="Delete current animation (keeps at least one)"
+                        disabled={animNames.length <= 1}
+                        onClick={() => {
+                            if (
+                                animNames.length > 1 &&
+                                confirm(`Delete animation “${currentName}”?`)
+                            ) {
+                                animation.delete();
+                            }
+                        }}
+                    >
+                        ✕
+                    </Btn>
+                    <span className="w-px h-5 bg-[#5a5555]" />
 
                     <Btn
                         title="First frame"
@@ -222,6 +312,14 @@ export default function Timeline() {
                     </select>
 
                     <span className="w-px h-5 bg-[#5a5555]" />
+
+                    <Btn
+                        title="Add 2-bone IK (select a parent bone and its child first)"
+                        disabled={Bone.selection.size !== 2}
+                        onClick={() => EventBus.emit("add-ik")}
+                    >
+                        🦾 IK
+                    </Btn>
 
                     <Btn
                         title="Export the skeleton and the animation as a JSON file for your game"

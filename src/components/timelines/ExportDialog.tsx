@@ -4,19 +4,32 @@ import {
     downloadText,
     fileNameFor,
 } from "../../export/export-animation";
+import { useAnimationStore } from "../../game/game-components/animation";
 
 /**
- * Export dialog: pick a name, see what goes into the file, download or copy it.
+ * Export dialog: export all animations (or just the current one), with optional bake.
  * The editor is locked behind the backdrop, so the preview can't go stale while this is open.
  */
 export default function ExportDialog({ onClose }: { onClose: () => void }) {
-    const [name, setName] = useState("animation");
+    const currentName = useAnimationStore((s) => s.currentName);
+    const animations = useAnimationStore((s) => s.animations);
+    const animNames = Object.keys(animations);
+    const [mode, setMode] = useState<"all" | "current">("all");
     const [bake, setBake] = useState(false);
     const [copied, setCopied] = useState(false);
 
-    const result = useMemo(() => buildExport({ name, bake }), [name, bake]);
+    const result = useMemo(
+        () =>
+            buildExport({
+                name: mode === "current" ? currentName : undefined,
+                bake,
+            }),
+        [mode, currentName, bake],
+    );
     const { json, warnings, stats } = result;
-    const fileName = fileNameFor(name);
+    const fileName = fileNameFor(
+        mode === "current" ? currentName : "animations",
+    );
 
     const copy = async () => {
         try {
@@ -52,16 +65,38 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                     </button>
                 </div>
 
-                <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
-                    Name
-                    <input
-                        autoFocus
-                        value={name}
-                        spellCheck={false}
-                        onChange={(e) => setName(e.target.value)}
-                        className="flex-1 bg-[#1f1d1d] text-white rounded px-2 py-1 border border-[#5a5555] focus:border-[#ffd54f] outline-none"
-                    />
-                </label>
+                <div className="flex flex-col gap-1.5 text-xs text-[#b5b0b0]">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                            type="radio"
+                            name="export-mode"
+                            checked={mode === "all"}
+                            onChange={() => setMode("all")}
+                        />
+                        <span>
+                            All animations ({animNames.length})
+                            <span className="text-[#878080]">
+                                {" "}
+                                — {animNames.join(", ")}
+                            </span>
+                        </span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                            type="radio"
+                            name="export-mode"
+                            checked={mode === "current"}
+                            onChange={() => setMode("current")}
+                        />
+                        <span>
+                            Current only
+                            <span className="text-[#878080]">
+                                {" "}
+                                — “{currentName}”
+                            </span>
+                        </span>
+                    </label>
+                </div>
 
                 <label
                     className="flex items-start gap-2 text-xs text-[#b5b0b0] cursor-pointer"
@@ -84,8 +119,10 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                 </label>
 
                 <div className="text-xs text-[#b5b0b0]">
-                    {stats.bones} bones · {stats.parts} rectangles ·{" "}
-                    {stats.keys} keys · {stats.seconds.toFixed(2)}s
+                    {stats.animations} animation
+                    {stats.animations !== 1 ? "s" : ""} · {stats.bones} bones ·{" "}
+                    {stats.parts} rectangles · {stats.keys} keys ·{" "}
+                    {stats.seconds.toFixed(2)}s total
                 </div>
 
                 {warnings.length > 0 && (
@@ -97,9 +134,7 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                 )}
 
                 <pre className="max-h-44 overflow-auto bg-[#1f1d1d] rounded p-2 text-[11px] leading-snug text-[#b5b0b0] border border-[#5a5555]">
-                    {json.length > 4000
-                        ? json.slice(0, 4000) + "\n…"
-                        : json}
+                    {json.length > 4000 ? json.slice(0, 4000) + "\n…" : json}
                 </pre>
 
                 <div className="flex items-center justify-end gap-2">
