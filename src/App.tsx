@@ -3,6 +3,7 @@ import { IRefPhaserGame, PhaserGame } from "./PhaserGame";
 import "./App.css";
 import Tab from "./components/tab/Tab";
 import Inspector from "./components/tab/Inspector";
+import Timeline from "./components/timelines/Timeline";
 
 function App() {
     //  References to the PhaserGame component (game and scene are exposed)
@@ -13,6 +14,7 @@ function App() {
             <div>
                 <Tab />
                 <Inspector />
+                <Timeline />
             </div>
         </div>
     );

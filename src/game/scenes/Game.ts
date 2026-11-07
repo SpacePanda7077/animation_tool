@@ -4,6 +4,7 @@ import { ObjectBuilder } from "../game-components/objects/object-builder";
 import { EventHandler } from "../game-components/EventHandler/EventHandler";
 import { Grid } from "../game-components/grid";
 import { history } from "../game-components/history";
+import { animation } from "../game-components/animation";
 
 export class Game extends Scene {
     objectBuilder: ObjectBuilder;
@@ -21,6 +22,46 @@ export class Game extends Scene {
         this.load.image("logo", "logo.png");
     }
 
+    /** Hold the middle mouse button and drag to pan the camera (the grid follows the camera by itself). */
+    setupCameraPan() {
+        let panning = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+            if (((p.event as MouseEvent).button ?? 0) !== 1) return;
+            panning = true;
+            lastX = p.x;
+            lastY = p.y;
+        });
+        this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+            if (!panning) return;
+            // button released outside the canvas, or released while the page didn't see it
+            if (!((p.event as MouseEvent).buttons & 4)) {
+                panning = false;
+                return;
+            }
+            const cam = this.cameras.main;
+            cam.scrollX -= (p.x - lastX) / cam.zoom;
+            cam.scrollY -= (p.y - lastY) / cam.zoom;
+            lastX = p.x;
+            lastY = p.y;
+        });
+        const stop = () => (panning = false);
+        this.input.on("pointerup", stop);
+        this.input.on("pointerupoutside", stop);
+
+        // stop the browser's middle-click auto-scroll circle from appearing
+        const canvas = this.game.canvas;
+        const block = (e: MouseEvent) => {
+            if (e.button === 1) e.preventDefault();
+        };
+        canvas.addEventListener("mousedown", block);
+        this.events.once("shutdown", () =>
+            canvas.removeEventListener("mousedown", block),
+        );
+    }
+
     create() {
         this.cameras.main.centerOn(0, 0);
         // in your scene's create()
@@ -30,14 +71,18 @@ export class Game extends Scene {
         // this.grid.snapPoint(pos);      // snaps { x, y } to the finest visible lines
         // this.grid.snap(value);         // snaps a single number
 
+        this.setupCameraPan();
+
         this.objectBuilder = new ObjectBuilder(this, this.grid);
         this.EventHandler = new EventHandler(this.objectBuilder);
         this.EventHandler.handleEvents();
+        animation.init(this, this.objectBuilder);
         history.init(this, this.objectBuilder);
         EventBus.emit("current-scene-ready", this);
 
         const cleanup = () => {
             this.EventHandler.destroy();
+            animation.destroy();
             history.destroy();
         };
         this.events.on("shutdown", cleanup);
