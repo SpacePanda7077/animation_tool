@@ -10,9 +10,10 @@
  *        local.y        = bone.y + key.y
  *        local.rotation = bone.rotation + key.rotation
  *    A bone without keys keeps its setup transform.
- *  - Parts (the rectangles) are listed in draw order, BACK to FRONT.
+ *  - Parts (rectangles and sprites) are listed in draw order, BACK to FRONT.
  *    A part with a bone is placed relative to that bone (x/y in the bone's rotated frame), a free part is in world space.
- *    The size is the final size (scale already applied); the rectangle is centred on its x/y.
+ *    The size is the final size (scale already applied); the part is centred on its x/y.
+ *    A sprite is its image stretched to that size, so draw it with that display size, not its natural size.
  */
 export type ExportInterp = "linear" | "smooth" | "step";
 
@@ -33,7 +34,10 @@ export type ExportBone = {
 
 export type ExportPart = {
     name: string;
-    type: "rect";
+    /** "rect" = a coloured rectangle, "sprite" = a picture (see `image`) */
+    type: "rect" | "sprite";
+    /** sprites only: the image's file name as it was imported (e.g. "arm.png"). Load it in your game under this name. */
+    image?: string;
     /** name of the controlling bone, null = free (world space) */
     bone: string | null;
     x: number;
@@ -41,9 +45,23 @@ export type ExportPart = {
     rotation: number;
     width: number;
     height: number;
-    /** "#rrggbb" */
+    /** "#rrggbb" (sprites have no fill, they always say "#ffffff") */
     color: string;
     visible: boolean;
+};
+
+/**
+ * A 2-bone IK constraint (a leg, an arm). Animations do NOT key it: they play as ordinary bone keys.
+ * In the game you drive it from code (target position, optional pole, weight), and it overrides the two bones.
+ */
+export type ExportIK = {
+    name: string;
+    /** the upper bone (thigh / upper arm) */
+    boneA: string;
+    /** the lower bone (shin / forearm); its parent is boneA */
+    boneB: string;
+    /** which way the middle joint (knee / elbow) bends: the side of the root -> target line the pole was on, 1 or -1 */
+    bend: 1 | -1;
 };
 
 export type ExportKey = {
@@ -79,4 +97,6 @@ export type ExportData = {
     /** draw order, back to front */
     parts: ExportPart[];
     animations: Record<string, ExportAnimation>;
+    /** IK constraints (missing when the scene has none) */
+    ik?: ExportIK[];
 };

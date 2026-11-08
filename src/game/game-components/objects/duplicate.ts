@@ -1,4 +1,5 @@
 import { Rect } from "./objetcs/Rect";
+import { Sprite } from "./objetcs/Sprite";
 import { Bone } from "./objetcs/Bone";
 import type { ObjectBuilder } from "./object-builder";
 import { useObjectsStore } from "../../../store/object-store";
@@ -6,16 +7,19 @@ import { useObjectsStore } from "../../../store/object-store";
 /** how far (world units) a copy is shifted so it doesn't hide the original */
 const SHIFT = 20;
 
-/** Copy one rect: same look, shifted, right in front of the original and in the same bone group. */
+/** Copy one rect or sprite: same look, shifted, right in front of the original and in the same bone group. */
 function duplicateRect(builder: ObjectBuilder, src: Rect): Rect {
     const s = src.snapshot();
-    const copy = builder.rect({
+    const base = {
         x: s.x,
         y: s.y,
         width: src.rect.width,
         height: src.rect.height,
-        color: s.color,
-    });
+    };
+    const copy =
+        src instanceof Sprite
+            ? builder.sprite({ ...base, texture: src.textureKey })
+            : builder.rect({ ...base, color: s.color });
     copy.restore({
         ...s,
         name: `${src.name} copy`,
@@ -32,7 +36,13 @@ function duplicateBoneTree(builder: ObjectBuilder, root: Bone): Bone {
     const map = new Map<Bone, Bone>();
 
     const copyBone = (src: Bone, parent: Bone | null): Bone => {
-        const nb = new Bone(builder.scene, src.baseX, src.baseY, src.length, parent);
+        const nb = new Bone(
+            builder.scene,
+            src.baseX,
+            src.baseY,
+            src.length,
+            parent,
+        );
         nb.name = `${src.name} copy`;
         nb.connected = src.connected;
         nb.offX = src.offX;

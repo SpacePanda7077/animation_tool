@@ -377,6 +377,18 @@ export class IKConstraint {
         this.draw();
     }
 
+    /**
+     * Which side of the root -> target line the pole is on: +1 / -1. This is the same test the solver uses to
+     * pick the bend direction, and it is what gets exported as `bend`.
+     */
+    bendSign(): 1 | -1 {
+        const r = this.getChainRootWorld();
+        const cross =
+            (this.targetX - r.x) * (this.poleY - r.y) -
+            (this.targetY - r.y) * (this.poleX - r.x);
+        return cross >= 0 ? 1 : -1;
+    }
+
     snapshot(): IKState {
         return {
             id: this.id,

@@ -62,6 +62,9 @@ export type SolvedBone = {
 
 export type SolvedPart = {
     name: string;
+    type: "rect" | "sprite";
+    /** sprites only: the image file name to draw */
+    image?: string;
     x: number;
     y: number;
     rotation: number;
@@ -121,6 +124,8 @@ export function solve(
     const parts = data.parts.map((p): SolvedPart => {
         const base = {
             name: p.name,
+            type: p.type,
+            image: p.image,
             width: p.width,
             height: p.height,
             color: p.color,

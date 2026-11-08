@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { isRoot, Obj, useObjectsStore } from "../../store/object-store";
 import { Rect } from "../../game/game-components/objects/objetcs/Rect";
+import { Sprite } from "../../game/game-components/objects/objetcs/Sprite";
 import { Bone } from "../../game/game-components/objects/objetcs/Bone";
 
 const fmt = (v: number) => String(Math.round(v * 100) / 100);
@@ -153,7 +154,11 @@ function Layers() {
                     ].join(" ")}
                 >
                     <span className="text-[#878080]">
-                        {o instanceof Bone ? "🦴" : "▭"}
+                        {o instanceof Bone
+                            ? "🦴"
+                            : o instanceof Sprite
+                              ? "🖼"
+                              : "▭"}
                     </span>
                     <span className="flex-1 truncate">{o.name}</span>
                     <button
@@ -180,10 +185,10 @@ function Layers() {
     return (
         <div className="flex flex-col gap-1 min-h-full">
             <div className="text-xs text-[#878080] mb-1">
-                Bones are always in front. Rectangles: top = front, drag to
-                reorder. In setup mode, drop a bone or rectangle onto a bone
-                to put it under that bone; dropping a rectangle above or below
-                another puts it in that one's group.
+                Bones are always in front. Rectangles and sprites: top = front,
+                drag to reorder. In setup mode, drop a bone, rectangle or sprite
+                onto a bone to put it under that bone; dropping one above or
+                below another puts it in that one's group.
             </div>
             {rootBones.map((o) => renderNode(o, 0))}
             {rootRects.map((o) => renderNode(o, 0))}
@@ -231,7 +236,11 @@ function Properties() {
         const b = selected;
         return (
             <div className="flex flex-col gap-3">
-                <NameField key={b.id} value={b.name} onCommit={(v) => b.setName(v)} />
+                <NameField
+                    key={b.id}
+                    value={b.name}
+                    onCommit={(v) => b.setName(v)}
+                />
 
                 <Group label="Pivot (world)">
                     <NumberField
@@ -307,10 +316,21 @@ function Properties() {
     }
 
     const r = selected;
+    const sprite = r instanceof Sprite ? r : null;
     const hex = r.rect.fillColor.toString(16).padStart(6, "0");
     return (
         <div className="flex flex-col gap-3">
-            <NameField key={r.id} value={r.name} onCommit={(v) => r.setName(v)} />
+            <NameField
+                key={r.id}
+                value={r.name}
+                onCommit={(v) => r.setName(v)}
+            />
+
+            {sprite && (
+                <Group label="Image">
+                    <Info label="File" value={sprite.textureKey} />
+                </Group>
+            )}
 
             {r.parentBone && (
                 <Group label="Controlled by">
@@ -379,19 +399,23 @@ function Properties() {
                 />
             </Group>
 
-            <Group label="Color">
-                <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
-                    <input
-                        type="color"
-                        value={`#${hex}`}
-                        onChange={(e) =>
-                            r.setColor(parseInt(e.target.value.slice(1), 16))
-                        }
-                        className="w-8 h-6 bg-transparent border-0 p-0"
-                    />
-                    #{hex}
-                </label>
-            </Group>
+            {!sprite && (
+                <Group label="Color">
+                    <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
+                        <input
+                            type="color"
+                            value={`#${hex}`}
+                            onChange={(e) =>
+                                r.setColor(
+                                    parseInt(e.target.value.slice(1), 16),
+                                )
+                            }
+                            className="w-8 h-6 bg-transparent border-0 p-0"
+                        />
+                        #{hex}
+                    </label>
+                </Group>
+            )}
         </div>
     );
 }

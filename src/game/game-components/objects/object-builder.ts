@@ -1,6 +1,7 @@
 import { Scene } from "phaser";
-import { rect_config } from "./configuration";
+import { rect_config, sprite_config } from "./configuration";
 import { Rect } from "./objetcs/Rect";
+import { Sprite } from "./objetcs/Sprite";
 import { Bone } from "./objetcs/Bone";
 import { Grid } from "../grid";
 import { useObjectsStore, type Obj } from "../../../store/object-store";
@@ -19,7 +20,11 @@ export class ObjectBuilder {
         Bone.mode = "setup";
         Bone.selection.clear();
         Bone.active = null;
-        useObjectsStore.setState({ objects: [], selected: null, mode: "setup" });
+        useObjectsStore.setState({
+            objects: [],
+            selected: null,
+            mode: "setup",
+        });
 
         // keep the React inspector in sync with bone changes / selection / hierarchy
         Bone.onChange = () => useObjectsStore.getState().bump();
@@ -36,6 +41,19 @@ export class ObjectBuilder {
 
     rect(config: rect_config): Rect {
         const rect = new Rect(this.scene, config);
+        this.register(rect);
+        return rect;
+    }
+
+    /** a picture (the texture must already be loaded, see sprite-textures.ts) */
+    sprite(config: sprite_config): Sprite {
+        const sprite = new Sprite(this.scene, config);
+        this.register(sprite);
+        return sprite;
+    }
+
+    /** hook a new rect / sprite up to the grid, the inspector and the object list */
+    private register(rect: Rect) {
         rect.grid = this.grid;
 
         rect.onChange = () => useObjectsStore.getState().bump();
@@ -46,7 +64,6 @@ export class ObjectBuilder {
         };
 
         this.addToObjects(rect);
-        return rect;
     }
 
     bone() {

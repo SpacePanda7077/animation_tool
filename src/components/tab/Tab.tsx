@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { EventBus } from "../../game/EventBus";
 import { useObjectsStore } from "../../store/object-store";
 import { history, useHistoryStore } from "../../game/game-components/history";
@@ -13,6 +14,13 @@ export default function Tab() {
 
     const handle_add_rect = () => {
         EventBus.emit("add_rect");
+    };
+    const fileInput = useRef<HTMLInputElement>(null);
+    const handle_add_sprite = () => fileInput.current?.click();
+    const handle_sprite_files = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(e.target.files ?? []);
+        e.target.value = ""; // so picking the same file again still fires
+        files.forEach((f) => EventBus.emit("add_sprite", f));
     };
     const handle_add_bone = () => {
         EventBus.emit("add_bone");
@@ -78,6 +86,22 @@ export default function Tab() {
                         square
                     </button>
                     <button
+                        title="Add one or more images as sprites"
+                        onClick={handle_add_sprite}
+                        disabled={!setup}
+                        className={addClass(setup)}
+                    >
+                        sprite
+                    </button>
+                    <input
+                        ref={fileInput}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        hidden
+                        onChange={handle_sprite_files}
+                    />
+                    <button
                         onClick={handle_add_bone}
                         disabled={!setup}
                         className={addClass(setup)}
@@ -85,7 +109,7 @@ export default function Tab() {
                         bone
                     </button>
                     <button
-                        title="Shift+D: copies the selected rectangle, or the selected bones with their children and rectangles"
+                        title="Shift+D: copies the selected rectangle or sprite, or the selected bones with their children and attached rectangles / sprites"
                         onClick={handle_duplicate}
                         disabled={!setup || !hasSelection}
                         className={addClass(setup && hasSelection)}

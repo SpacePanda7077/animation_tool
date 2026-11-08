@@ -1,5 +1,7 @@
 import { Bone } from "../game/game-components/objects/objetcs/Bone";
 import { Rect } from "../game/game-components/objects/objetcs/Rect";
+import { Sprite } from "../game/game-components/objects/objetcs/Sprite";
+import { IKConstraint } from "../game/game-components/ik";
 import { useObjectsStore } from "../store/object-store";
 import {
     sample,
@@ -10,6 +12,7 @@ import type {
     ExportAnimation,
     ExportBone,
     ExportData,
+    ExportIK,
     ExportKey,
     ExportPart,
 } from "./format";
@@ -207,7 +210,7 @@ export function buildExport(options: ExportOptions): ExportResult {
         .reverse();
     const partNames = uniqueNames(
         rects.map((r) => r.name),
-        "rectangles",
+        "parts",
         warnings,
     );
     const parts: ExportPart[] = rects.map((r, i) => {
@@ -228,19 +231,45 @@ export function buildExport(options: ExportOptions): ExportResult {
             y = -dx * sn + dy * c;
             rotation = s.rot - w.rot;
         }
-        return {
+        const part: ExportPart = {
             name: partNames[i],
-            type: "rect",
+            type: r instanceof Sprite ? "sprite" : "rect",
             bone: b ? boneNames.get(b)! : null,
             x,
             y,
             rotation,
             width,
             height,
-            color: hex(s.color),
+            color: r instanceof Sprite ? "#ffffff" : hex(s.color),
             visible: !r.hidden,
         };
+        if (r instanceof Sprite) part.image = r.textureKey;
+        return part;
     });
+
+    const images = [
+        ...new Set(parts.flatMap((p) => (p.image ? [p.image] : []))),
+    ];
+    if (images.length)
+        warnings.push(
+            `Sprites refer to their images by file name (${images.join(", ")}); load them in your game under the same names.`,
+        );
+
+    // ---------- IK (the game drives these from code; animations don't key them) ----------
+    const liveIK = IKConstraint.all.filter(
+        (c) => boneNames.has(c.boneA) && boneNames.has(c.boneB),
+    );
+    const ikNames = uniqueNames(
+        liveIK.map((c) => c.name),
+        "IK constraints",
+        warnings,
+    );
+    const ik: ExportIK[] = liveIK.map((c, i) => ({
+        name: ikNames[i],
+        boneA: boneNames.get(c.boneA)!,
+        boneB: boneNames.get(c.boneB)!,
+        bend: c.bendSign(),
+    }));
 
     // ---------- animations ----------
     const byId = new Map<string, Bone>();
@@ -278,6 +307,7 @@ export function buildExport(options: ExportOptions): ExportResult {
         bones,
         parts,
         animations,
+        ...(ik.length ? { ik } : {}),
     };
 
     return {
@@ -311,3 +341,4 @@ export function downloadText(text: string, fileName: string) {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+

@@ -121,7 +121,7 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                 <div className="text-xs text-[#b5b0b0]">
                     {stats.animations} animation
                     {stats.animations !== 1 ? "s" : ""} · {stats.bones} bones ·{" "}
-                    {stats.parts} rectangles · {stats.keys} keys ·{" "}
+                    {stats.parts} parts ·{stats.keys} keys ·{" "}
                     {stats.seconds.toFixed(2)}s total
                 </div>
 

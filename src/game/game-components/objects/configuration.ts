@@ -10,3 +10,14 @@ export type rect_config = {
     };
 };
 
+export type sprite_config = {
+    x: number;
+    y: number;
+    /** size it is shown at (the picture is stretched to it) */
+    width: number;
+    height: number;
+    /** key of a texture that is already loaded (see sprite-textures.ts) */
+    texture: string;
+    /** layer name, defaults to the texture key */
+    name?: string;
+};
