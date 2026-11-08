@@ -36,6 +36,12 @@ const DEFAULT_ANIM: AnimData = {
     tracks: {},
 };
 
+/** every animation and which one is open (what undo / redo saves) */
+export type AnimSnapshot = {
+    currentName: string;
+    animations: Record<string, AnimData>;
+};
+
 type AnimStore = AnimData & {
     /** playhead; fractional while playing, whole when you scrub */
     frame: number;
@@ -307,15 +313,18 @@ class Animation {
         const st = useAnimationStore.getState();
         if (name === st.currentName || !st.animations[name]) return;
         this.stop();
-        this.saveCurrent();
-        useAnimationStore.setState({ currentName: name });
-        this.loadIntoWorking(name);
-        this.touch();
+        // choosing which animation to look at is not an edit (like moving the playhead): no undo step
+        history.silent(() => {
+            this.saveCurrent();
+            useAnimationStore.setState({ currentName: name });
+            this.loadIntoWorking(name);
+        });
     }
 
     /** Create a new empty animation and switch to it. */
     create(name?: string) {
         this.stop();
+        history.checkpoint(); // an edit made a moment ago stays its own undo step
         this.saveCurrent();
         const st = useAnimationStore.getState();
         let base = (name?.trim() || "anim").replace(/\s+/g, " ");
@@ -342,6 +351,7 @@ class Animation {
     /** Duplicate the current animation under a new name and switch to the copy. */
     duplicate(name?: string) {
         this.stop();
+        history.checkpoint();
         this.saveCurrent();
         const st = useAnimationStore.getState();
         const src = st.animations[st.currentName] ?? copyAnimData(DEFAULT_ANIM);
@@ -375,6 +385,7 @@ class Animation {
         const name = newName.trim().replace(/\s+/g, " ");
         if (!name || name === st.currentName) return st.currentName;
         if (st.animations[name]) return null; // name already taken
+        history.checkpoint();
         this.saveCurrent();
         const { [st.currentName]: data, ...rest } = st.animations;
         useAnimationStore.setState({
@@ -392,6 +403,7 @@ class Animation {
         const names = Object.keys(st.animations);
         if (names.length <= 1 || !st.animations[target]) return false;
         this.stop();
+        history.checkpoint();
         const { [target]: _, ...rest } = st.animations;
         const nextName =
             target === st.currentName ? Object.keys(rest)[0] : st.currentName;
@@ -816,27 +828,46 @@ class Animation {
 
     // ---------- undo / redo support ----------
 
-    snapshot(): AnimData {
-        const { fps, end, loop, tracks } = useAnimationStore.getState();
-        return { fps, end, loop, tracks: copyTracks(tracks) };
+    /** a copy of every animation (the open one is read from the working fields) and which one is open */
+    snapshot(): AnimSnapshot {
+        const st = useAnimationStore.getState();
+        const animations: Record<string, AnimData> = {};
+        for (const [name, d] of Object.entries(st.animations))
+            animations[name] = copyAnimData(d);
+        animations[st.currentName] = copyAnimData({
+            fps: st.fps,
+            end: st.end,
+            loop: st.loop,
+            tracks: st.tracks,
+        });
+        return { currentName: st.currentName, animations };
     }
 
-    load(d: AnimData) {
+    load(snap: AnimSnapshot) {
+        this.stop();
         const st = useAnimationStore.getState();
-        const tracks = copyTracks(d.tracks);
+        const animations: Record<string, AnimData> = {};
+        for (const [name, d] of Object.entries(snap.animations))
+            animations[name] = copyAnimData(d);
+        const currentName = animations[snap.currentName]
+            ? snap.currentName
+            : Object.keys(animations)[0];
+        const cur = animations[currentName] ?? copyAnimData(DEFAULT_ANIM);
+        const tracks = copyTracks(cur.tracks);
         const selected = st.selected.filter((id) => {
             const [bid, f] = parseId(id);
             return tracks[bid]?.some((k) => k.frame === f);
         });
         useAnimationStore.setState({
-            fps: d.fps,
-            end: d.end,
-            loop: d.loop,
+            animations,
+            currentName,
+            fps: cur.fps,
+            end: cur.end,
+            loop: cur.loop,
             tracks,
             selected,
-            frame: Math.min(st.frame, d.end),
+            frame: Math.min(st.frame, cur.end),
         });
-        this.saveCurrent();
         this.apply();
     }
 

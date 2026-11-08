@@ -5,7 +5,7 @@ import { Rect, type RectState } from "./objects/objetcs/Rect";
 import type { ObjectBuilder } from "./objects/object-builder";
 import { useObjectsStore, type Obj } from "../../store/object-store";
 import type { BoneMode } from "./objects/objetcs/Bone";
-import { animation, type AnimData } from "./animation";
+import { animation, type AnimSnapshot } from "./animation";
 
 /** the whole document as plain data */
 type Snapshot = {
@@ -14,8 +14,8 @@ type Snapshot = {
     order: string[];
     bones: BoneState[];
     rects: RectState[];
-    /** keyframes, fps, length (the playhead is not part of it) */
-    anim: AnimData;
+    /** every animation (keys, fps, length) and which one is open; the playhead is not part of it */
+    anim: AnimSnapshot;
 };
 
 /** for the undo / redo buttons */
@@ -24,13 +24,16 @@ export const useHistoryStore = create<{ canUndo: boolean; canRedo: boolean }>(
 );
 
 const MAX_STEPS = 100;
-/** a change becomes an undo step once nothing has changed for this long (and no mouse button is held) */
-const SETTLE_MS = 250;
+/** a change becomes an undo step once nothing has changed for this long */
+const SETTLE_MS = 300;
 
 /**
  * Undo / redo by snapshots.
  *  - Anything that changes the store (every edit bumps it) schedules a checkpoint; once things settle,
  *    the new state is compared to the last one and pushed as a step if it differs. So a whole drag = one step.
+ *  - "Settled" = nothing changed for a moment. A drag changes the scene every frame, so it stays one step without
+ *    asking where the mouse button is (a mouse-up the game never saw must not be able to stop steps from being
+ *    recorded: then one undo would jump all the way back to the empty scene).
  *  - Undo / redo put a snapshot back onto the existing objects. Objects that didn't exist then are hidden
  *    (kill), objects that did are brought back (revive), so redo gets the very same instances.
  *  - Selection is not part of history.
@@ -47,7 +50,6 @@ class History {
     /** > 0 while something changes the document without wanting undo steps (scrubbing, playback) */
     private holds = 0;
     private unsubscribe: (() => void) | null = null;
-
     private onKey = (e: KeyboardEvent) => {
         if (!(e.ctrlKey || e.metaKey)) return;
         const key = e.key.toLowerCase();
@@ -90,26 +92,10 @@ class History {
 
     // ---------- recording ----------
 
-    private waited = 0;
     private schedule() {
-        if (this.restoring || this.holds > 0 || !this.head) {
-            console.log(
-                `[history] change ignored: restoring=${this.restoring} holds=${this.holds} head=${!!this.head}`,
-            );
-            return;
-        }
+        if (this.restoring || this.holds > 0 || !this.head) return;
         if (this.timer) clearTimeout(this.timer);
-        this.timer = setTimeout(() => {
-            this.timer = null;
-            // still dragging? wait for the mouse button to go up (but never wait forever)
-            if (this.scene?.input.activePointer.isDown && this.waited < 40) {
-                this.waited++;
-                this.schedule();
-            } else {
-                this.waited = 0;
-                this.checkpoint();
-            }
-        }, SETTLE_MS);
+        this.timer = setTimeout(() => this.checkpoint(), SETTLE_MS);
     }
 
     /** Record the current state as a step if it differs from the last recorded one. */
@@ -121,16 +107,6 @@ class History {
         const key = JSON.stringify(cur);
         if (key === this.headKey) return;
         this.undoStack.push(this.head);
-        console.log(
-            `[history] step recorded (${this.undoStack.length}); now ${cur.bones.length} bones, ${cur.rects.length} rects; store has ${useObjectsStore.getState().objects.length} objects [${useObjectsStore
-                .getState()
-                .objects.map(
-                    (o) =>
-                        o.constructor.name +
-                        (o instanceof Bone ? "(Bone)" : ""),
-                )
-                .join(", ")}]; mode ${cur.mode}`,
-        );
         if (this.undoStack.length > MAX_STEPS) this.undoStack.shift();
         this.head = cur;
         this.headKey = key;
@@ -178,11 +154,12 @@ class History {
         const prev = this.undoStack.pop();
         if (!prev || !this.head) return;
         this.redoStack.push(this.head);
-        // DEBUG: remove once the "undo wipes everything" bug is understood
-        console.log(
-            `[history] undo: going back to a state with ${prev.bones.length} bones, ${prev.rects.length} rects, mode ${prev.mode}; steps left ${this.undoStack.length}; holds ${this.holds}`,
-        );
-        this.apply(prev);
+        if (!this.apply(prev)) {
+            // it couldn't be restored: keep the step, the scene is back as it was
+            this.redoStack.pop();
+            this.undoStack.push(prev);
+            this.updateFlags();
+        }
     }
 
     redo() {
@@ -190,15 +167,28 @@ class History {
         const next = this.redoStack.pop();
         if (!next || !this.head) return;
         this.undoStack.push(this.head);
-        this.apply(next);
+        if (!this.apply(next)) {
+            this.undoStack.pop();
+            this.redoStack.push(next);
+            this.updateFlags();
+        }
     }
 
-    private apply(snap: Snapshot) {
+    /** Put a snapshot back. If that fails halfway the scene is put back as it was (never leave objects half-hidden). */
+    private apply(snap: Snapshot): boolean {
+        const backup = this.snapshot();
+        let ok = true;
         this.restoring = true;
         try {
             this.restore(snap);
         } catch (err) {
-            console.error("[history] restore failed", err);
+            ok = false;
+            console.error("[history] restore failed, putting the scene back as it was", err);
+            try {
+                this.restore(backup);
+            } catch (err2) {
+                console.error("[history] could not put the scene back", err2);
+            }
         } finally {
             this.restoring = false;
         }
@@ -206,6 +196,7 @@ class History {
         this.head = this.snapshot();
         this.headKey = JSON.stringify(this.head);
         this.updateFlags();
+        return ok;
     }
 
     // ---------- snapshot / restore ----------
@@ -247,16 +238,19 @@ class History {
             const o = reg.get(id);
             return o instanceof Bone ? o : undefined;
         };
-        const bones = snap.bones.map((s) => {
-            const b = bone(s.id)!;
+        const bones: Bone[] = [];
+        for (const s of snap.bones) {
+            const b = bone(s.id);
+            if (!b) continue;
             b.restore(s, bone);
             b.attachments = [];
-            return b;
-        });
+            bones.push(b);
+        }
 
         // rects: numbers + which bone controls them
         for (const s of snap.rects) {
-            const r = reg.get(s.id) as Rect;
+            const r = reg.get(s.id);
+            if (!(r instanceof Rect)) continue;
             r.restore(s);
             const pb = s.parentBone ? bone(s.parentBone) : undefined;
             r.parentBone = pb ?? null;
