@@ -90,14 +90,25 @@ class History {
 
     // ---------- recording ----------
 
+    private waited = 0;
     private schedule() {
-        if (this.restoring || this.holds > 0 || !this.head) return;
+        if (this.restoring || this.holds > 0 || !this.head) {
+            console.log(
+                `[history] change ignored: restoring=${this.restoring} holds=${this.holds} head=${!!this.head}`,
+            );
+            return;
+        }
         if (this.timer) clearTimeout(this.timer);
         this.timer = setTimeout(() => {
             this.timer = null;
-            // still dragging? wait for the mouse button to go up
-            if (this.scene?.input.activePointer.isDown) this.schedule();
-            else this.checkpoint();
+            // still dragging? wait for the mouse button to go up (but never wait forever)
+            if (this.scene?.input.activePointer.isDown && this.waited < 40) {
+                this.waited++;
+                this.schedule();
+            } else {
+                this.waited = 0;
+                this.checkpoint();
+            }
         }, SETTLE_MS);
     }
 
@@ -110,6 +121,16 @@ class History {
         const key = JSON.stringify(cur);
         if (key === this.headKey) return;
         this.undoStack.push(this.head);
+        console.log(
+            `[history] step recorded (${this.undoStack.length}); now ${cur.bones.length} bones, ${cur.rects.length} rects; store has ${useObjectsStore.getState().objects.length} objects [${useObjectsStore
+                .getState()
+                .objects.map(
+                    (o) =>
+                        o.constructor.name +
+                        (o instanceof Bone ? "(Bone)" : ""),
+                )
+                .join(", ")}]; mode ${cur.mode}`,
+        );
         if (this.undoStack.length > MAX_STEPS) this.undoStack.shift();
         this.head = cur;
         this.headKey = key;
