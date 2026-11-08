@@ -42,6 +42,24 @@ export class Bone {
     static active: Bone | null = null;
     private static readyScenes = new WeakSet<Scene>();
 
+    /** a press on a bone's body: it may turn into a drag that moves every selected bone */
+    private static press: {
+        bone: Bone;
+        /** pointer (world / screen) and the pressed bone's pivot when the press started */
+        wx: number;
+        wy: number;
+        sx: number;
+        sy: number;
+        pivotX: number;
+        pivotY: number;
+        /** how far the selection has been moved so far */
+        doneX: number;
+        doneY: number;
+        moved: boolean;
+        /** a plain click (no drag) on one of several selected bones narrows the selection to it */
+        collapse: boolean;
+    } | null = null;
+
     /** Set this to a Grid to enable snapping: hold Ctrl while dragging a pivot or pole. */
     static grid: Grid | null = null;
     /** true = always snap (Ctrl then does nothing) */
@@ -136,9 +154,7 @@ export class Bone {
             .setAlpha(0.001)
             .setInteractive()
             .setData("bone", this)
-            .on("pointerdown", (p: Input.Pointer) =>
-                Bone.click(this, (p.event as MouseEvent).shiftKey),
-            );
+            .on("pointerdown", (p: Input.Pointer) => Bone.pressBody(this, p));
 
         this.pivot = scene.add
             .circle(x, y, 6, 0xfff000)
@@ -161,9 +177,14 @@ export class Bone {
                 // IK-driven bones cannot be moved manually in pose mode
                 if (this.posing && IKConstraint.isLocked(this)) return;
                 const { x, y } = Bone.snapPoint(rawX, rawY, p);
-                this.movePivotTo(x, y);
-                // After moving a bone that is an IK chain root / parent, re-sync IKs
-                if (this.posing) IKConstraint.syncAll();
+                if (Bone.selection.size > 1) {
+                    // several bones selected: they all move by the same amount
+                    Bone.moveSelectedBy(x - this.pivot.x, y - this.pivot.y);
+                } else {
+                    this.movePivotTo(x, y);
+                    // After moving a bone that is an IK chain root / parent, re-sync IKs
+                    if (this.posing) IKConstraint.syncAll();
+                }
             },
         );
 
@@ -285,6 +306,10 @@ export class Bone {
             }
         });
 
+        scene.input.on("pointermove", (p: Input.Pointer) => Bone.dragBody(p));
+        scene.input.on("pointerup", () => Bone.releaseBody());
+        scene.input.on("pointerupoutside", () => Bone.releaseBody());
+
         // clicking anything that isn't part of a bone deselects (unless Shift is held)
         scene.input.on(
             "pointerdown",
@@ -293,6 +318,85 @@ export class Bone {
                 if (!over.some((o) => o.getData("bone"))) Bone.setSelection([]);
             },
         );
+    }
+
+    // ---------- moving the selection ----------
+
+    /** Press on a bone's body. Shift toggles it in the selection; otherwise a drag moves every selected bone. */
+    private static pressBody(bone: Bone, p: Input.Pointer) {
+        const ev = p.event as MouseEvent;
+        if ((ev.button ?? 0) !== 0 || ev.shiftKey) {
+            Bone.click(bone, ev.shiftKey);
+            return;
+        }
+        const several = Bone.selection.has(bone) && Bone.selection.size > 1;
+        if (several) {
+            // keep the whole selection so it can be dragged; the pressed bone becomes the active one
+            Bone.setSelection([...Bone.selection], bone);
+        } else {
+            Bone.click(bone, false);
+        }
+        Bone.press = {
+            bone,
+            wx: p.worldX,
+            wy: p.worldY,
+            sx: p.x,
+            sy: p.y,
+            pivotX: bone.pivot.x,
+            pivotY: bone.pivot.y,
+            doneX: 0,
+            doneY: 0,
+            moved: false,
+            collapse: several,
+        };
+    }
+
+    private static dragBody(p: Input.Pointer) {
+        const d = Bone.press;
+        if (!d) return;
+        if (!((p.event as MouseEvent).buttons & 1)) {
+            Bone.press = null; // button was released somewhere we didn't see
+            return;
+        }
+        if (!d.moved && Math.hypot(p.x - d.sx, p.y - d.sy) < 4) return;
+        d.moved = true;
+        // where the pressed bone's pivot should be now (snapped to the grid with Ctrl)
+        const t = Bone.snapPoint(
+            d.pivotX + (p.worldX - d.wx),
+            d.pivotY + (p.worldY - d.wy),
+            p,
+        );
+        const totalX = t.x - d.pivotX;
+        const totalY = t.y - d.pivotY;
+        Bone.moveSelectedBy(totalX - d.doneX, totalY - d.doneY);
+        d.doneX = totalX;
+        d.doneY = totalY;
+    }
+
+    private static releaseBody() {
+        const d = Bone.press;
+        Bone.press = null;
+        if (d && !d.moved && d.collapse) Bone.setSelection([d.bone]);
+    }
+
+    /**
+     * Move every selected bone by (dx, dy) in world space.
+     * A bone is left out when something above it is moving too (it is carried along), or when it can't be
+     * moved by hand (a connected child in setup mode, an IK-driven bone in pose mode).
+     */
+    static moveSelectedBy(dx: number, dy: number) {
+        if (!dx && !dy) return;
+        const movable = [...Bone.selection].filter(
+            (b) => b.alive && !b.hidden && b.canMovePivot,
+        );
+        const set = new Set(movable);
+        const movers = movable.filter((b) => {
+            for (let a = b.parent; a; a = a.parent)
+                if (set.has(a)) return false;
+            return true;
+        });
+        for (const b of movers) b.movePivotTo(b.pivot.x + dx, b.pivot.y + dy);
+        if (movers.length && Bone.mode === "pose") IKConstraint.syncAll();
     }
 
     // ---------- hierarchy operations ----------
@@ -655,4 +759,3 @@ export class Bone {
             .setScale(this.length / 100, 1);
     }
 }
-

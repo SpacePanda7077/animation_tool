@@ -5,6 +5,7 @@ import {
     animation,
     keyId,
     useAnimationStore,
+    type FlipMode,
     type Interp,
 } from "../../game/game-components/animation";
 import { EventBus } from "../../game/EventBus";
@@ -35,7 +36,16 @@ export default function Timeline() {
         selected,
         currentName,
         animations,
+        clip,
+        flipMode,
+        notice,
     } = useAnimationStore();
+    const [box, setBox] = useState<{
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+    } | null>(null);
 
     const [ppf, setPpf] = useState(14); // pixels per frame (Ctrl + wheel to zoom)
     const [dragDelta, setDragDelta] = useState(0);
@@ -51,6 +61,52 @@ export default function Timeline() {
     const rulerRef = useRef<HTMLDivElement>(null);
     const scrubbing = useRef(false);
     const keyDrag = useRef<{ startX: number } | null>(null);
+
+    /** press on empty track space: a plain click selects the bone, dragging draws a box that selects keys */
+    const startBox = (e: React.PointerEvent, bone: Bone) => {
+        if (e.button !== 0) return;
+        const add = e.shiftKey;
+        const sx = e.clientX;
+        const sy = e.clientY;
+        let active = false;
+        if (!add) {
+            bone.select();
+            animation.clearSelection();
+        }
+        if (!posing) return;
+        const move = (ev: PointerEvent) => {
+            if (!active && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4)
+                return;
+            active = true;
+            setBox({ x1: sx, y1: sy, x2: ev.clientX, y2: ev.clientY });
+        };
+        const up = (ev: PointerEvent) => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            setBox(null);
+            if (!active) return;
+            const l = Math.min(sx, ev.clientX);
+            const r = Math.max(sx, ev.clientX);
+            const t = Math.min(sy, ev.clientY);
+            const b = Math.max(sy, ev.clientY);
+            const ids: string[] = [];
+            scrollRef.current
+                ?.querySelectorAll<HTMLElement>("[data-key]")
+                .forEach((el) => {
+                    const q = el.getBoundingClientRect();
+                    if (
+                        q.right >= l &&
+                        q.left <= r &&
+                        q.bottom >= t &&
+                        q.top <= b
+                    )
+                        ids.push(el.dataset.key!);
+                });
+            animation.selectKeys(ids, add);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+    };
 
     // Ctrl + wheel = zoom (needs a non-passive listener to stop the page from zooming)
     useEffect(() => {
@@ -314,6 +370,42 @@ export default function Timeline() {
                     <span className="w-px h-5 bg-[#5a5555]" />
 
                     <Btn
+                        title="Copy the selected keys, or the current pose of the selected bones when no key is selected (Ctrl+C)"
+                        disabled={!posing}
+                        onClick={() => animation.copyClip()}
+                    >
+                        ⧉ Copy
+                    </Btn>
+                    <Btn
+                        title="Paste at the playhead (Ctrl+V)"
+                        disabled={!posing || !clip}
+                        onClick={() => animation.pasteClip(false)}
+                    >
+                        Paste
+                    </Btn>
+                    <Btn
+                        title="Paste at the playhead onto the opposite-side bones, e.g. Arm L → Arm R (Ctrl+Shift+V)"
+                        disabled={!posing || !clip}
+                        onClick={() => animation.pasteClip(true)}
+                    >
+                        ⇋ Flip paste
+                    </Btn>
+                    <select
+                        title="Swap: the other side does the same motion (run / walk cycles). Mirror: the other side does the mirror image (front view)"
+                        value={flipMode}
+                        onChange={(e) =>
+                            animation.setFlipMode(e.target.value as FlipMode)
+                        }
+                        onKeyDown={(e) => e.stopPropagation()}
+                        className="bg-[#1f1d1d] text-white text-xs rounded px-1 py-1 border border-[#5a5555]"
+                    >
+                        <option value="swap">Swap</option>
+                        <option value="mirror">Mirror</option>
+                    </select>
+
+                    <span className="w-px h-5 bg-[#5a5555]" />
+
+                    <Btn
                         title="Add 2-bone IK (select a parent bone and its child first)"
                         disabled={Bone.selection.size !== 2}
                         onClick={() => EventBus.emit("add-ik")}
@@ -327,6 +419,10 @@ export default function Timeline() {
                     >
                         ⭳ Export
                     </Btn>
+
+                    {notice && (
+                        <span className="text-xs text-[#ff8a65]">{notice}</span>
+                    )}
 
                     {!posing && (
                         <span className="text-xs text-[#ffd54f]">
@@ -462,10 +558,9 @@ export default function Timeline() {
                                                     ? ticks(ppf, "#363333")
                                                     : {}),
                                             }}
-                                            onPointerDown={() => {
-                                                bone.select();
-                                                animation.clearSelection();
-                                            }}
+                                            onPointerDown={(e) =>
+                                                startBox(e, bone)
+                                            }
                                             onDoubleClick={(e) => {
                                                 if (!posing) return;
                                                 animation.insertKeyAt(
@@ -489,6 +584,7 @@ export default function Timeline() {
                                                 return (
                                                     <div
                                                         key={k.frame}
+                                                        data-key={id}
                                                         title={`${bone.name} · frame ${k.frame} · ${k.interp}`}
                                                         className={[
                                                             "absolute top-1/2 rotate-45 -translate-y-1/2 z-[7] border",
@@ -593,6 +689,18 @@ export default function Timeline() {
                 )}
             </div>
 
+            {box && (
+                <div
+                    className="fixed pointer-events-none z-50 border border-[#ffd54f] bg-[#ffd54f]/15"
+                    style={{
+                        left: Math.min(box.x1, box.x2),
+                        top: Math.min(box.y1, box.y2),
+                        width: Math.abs(box.x2 - box.x1),
+                        height: Math.abs(box.y2 - box.y1),
+                    }}
+                />
+            )}
+
             {exporting && <ExportDialog onClose={() => setExporting(false)} />}
         </div>
     );
@@ -689,4 +797,3 @@ function IntField({
         </label>
     );
 }
-

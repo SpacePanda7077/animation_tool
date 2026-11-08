@@ -10,8 +10,20 @@ import type { ExportAnimation, ExportData, ExportKey } from "./format";
 
 export type PoseDelta = { rotation: number; x: number; y: number };
 
+/** Blend two angles along the SHORT way round (never more than half a turn). Same as the editor. */
+function lerpAngle(a: number, b: number, t: number): number {
+    const TAU = Math.PI * 2;
+    let d = (b - a) % TAU;
+    if (d > Math.PI) d -= TAU;
+    else if (d < -Math.PI) d += TAU;
+    return a + d * t;
+}
+
 /** the pose offsets of one bone at `frame` (holds the first / last key outside the range). Null without keys. */
-export function sampleKeys(keys: ExportKey[] | undefined, frame: number): PoseDelta | null {
+export function sampleKeys(
+    keys: ExportKey[] | undefined,
+    frame: number,
+): PoseDelta | null {
     const n = keys?.length ?? 0;
     if (!keys || n === 0) return null;
     if (frame <= keys[0].frame) return keys[0];
@@ -24,7 +36,7 @@ export function sampleKeys(keys: ExportKey[] | undefined, frame: number): PoseDe
     let t = (frame - a.frame) / (b.frame - a.frame);
     if (a.interp === "smooth") t = t * t * (3 - 2 * t);
     return {
-        rotation: a.rotation + (b.rotation - a.rotation) * t,
+        rotation: lerpAngle(a.rotation, b.rotation, t),
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
     };
@@ -69,12 +81,20 @@ export type SolvedPose = {
  * World transforms of every bone and part at `frame`.
  * Pass animationName = null for the setup pose.
  */
-export function solve(data: ExportData, animationName: string | null, frame: number): SolvedPose {
+export function solve(
+    data: ExportData,
+    animationName: string | null,
+    frame: number,
+): SolvedPose {
     const anim = animationName ? data.animations[animationName] : undefined;
     const bones: Record<string, SolvedBone> = {};
 
     for (const b of data.bones) {
-        const d = sampleKeys(anim?.bones[b.name], frame) ?? { rotation: 0, x: 0, y: 0 };
+        const d = sampleKeys(anim?.bones[b.name], frame) ?? {
+            rotation: 0,
+            x: 0,
+            y: 0,
+        };
         const lx = b.x + d.x;
         const ly = b.y + d.y;
         const lr = b.rotation + d.rotation;
@@ -99,7 +119,13 @@ export function solve(data: ExportData, animationName: string | null, frame: num
     }
 
     const parts = data.parts.map((p): SolvedPart => {
-        const base = { name: p.name, width: p.width, height: p.height, color: p.color, visible: p.visible };
+        const base = {
+            name: p.name,
+            width: p.width,
+            height: p.height,
+            color: p.color,
+            visible: p.visible,
+        };
         const b = p.bone ? bones[p.bone] : null;
         if (!b) return { ...base, x: p.x, y: p.y, rotation: p.rotation };
         const c = Math.cos(b.rotation);

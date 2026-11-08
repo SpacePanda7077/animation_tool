@@ -55,6 +55,18 @@ export class Rect implements BoneAttachment {
     snapAlways = false;
 
     private static count = 0;
+
+    /** Several rects picked with the box select: outlined, and they move together. A group of one is not a group. */
+    static group = new Set<Rect>();
+
+    /** replace the group (the outlines follow) */
+    static setGroup(rects: Rect[]) {
+        const next = new Set(rects.length > 1 ? rects : []);
+        for (const r of Rect.group) if (!next.has(r)) r.rect.setStrokeStyle();
+        for (const r of next) r.rect.setStrokeStyle(2, 0xffd54f);
+        Rect.group = next;
+    }
+
     /** hidden rects are not drawn and can't be selected */
     hidden = false;
     /** false = removed from the scene (e.g. undo of a create), kept around so redo can bring it back */
@@ -168,6 +180,8 @@ export class Rect implements BoneAttachment {
     }
 
     deselect() {
+        if (Rect.group.has(this))
+            Rect.setGroup([...Rect.group].filter((r) => r !== this));
         this.mode = null;
         this.clicks = -1;
         this.click = -1;
@@ -484,6 +498,7 @@ export class Rect implements BoneAttachment {
 
     handleClicks() {
         if (this.hidden || !this.alive) return;
+        if (Rect.group.size) Rect.setGroup([]); // picking one rect leaves the group
         this.clicks++;
         const click = this.clicks % 2;
         this.click = click;
@@ -520,14 +535,21 @@ export class Rect implements BoneAttachment {
         d: Extract<Drag, { type: "move" }>,
         p: Phaser.Input.Pointer,
     ) {
-        if (this.mode === null) return; // only movable while selected
+        // only movable while selected (or while in a box-selected group)
+        if (this.mode === null && !Rect.group.has(this)) return;
         if (!d.moved) {
             if (Math.hypot(p.worldX - d.startX, p.worldY - d.startY) < 4)
                 return;
             d.moved = true;
         }
         const s = this.snapPt(p.worldX + d.offX, p.worldY + d.offY, p);
+        const dx = s.x - this.rect.x;
+        const dy = s.y - this.rect.y;
         this.rect.setPosition(s.x, s.y); // snaps the rect's center
+        // the rest of the group moves by the same amount
+        if (Rect.group.has(this))
+            for (const o of Rect.group)
+                if (o !== this) o.setPosition(o.rect.x + dx, o.rect.y + dy);
     }
 
     /** Scale from a handle; the opposite edge/corner stays fixed. */
@@ -605,3 +627,4 @@ export class Rect implements BoneAttachment {
         this.pivotIndicator.setVisible(true);
     }
 }
+

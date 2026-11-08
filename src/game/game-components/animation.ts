@@ -46,7 +46,26 @@ type AnimStore = AnimData & {
     currentName: string;
     /** all named animations (working state is always mirrored into this for the current one) */
     animations: Record<string, AnimData>;
+    /** copied keys / pose (see copyClip) */
+    clip: Clip | null;
+    /** how a flipped paste treats the values: swap = other side does the same, mirror = other side does the mirror image */
+    flipMode: FlipMode;
+    /** short message for the timeline header (e.g. why a flip paste did nothing) */
+    notice: string;
 };
+
+export type FlipMode = "swap" | "mirror";
+type ClipKey = {
+    boneId: string;
+    name: string;
+    /** frames after the first copied frame */
+    df: number;
+    rot: number;
+    x: number;
+    y: number;
+    interp: Interp;
+};
+export type Clip = { keys: ClipKey[]; span: number };
 
 export const useAnimationStore = create<AnimStore>(() => ({
     ...DEFAULT_ANIM,
@@ -55,6 +74,9 @@ export const useAnimationStore = create<AnimStore>(() => ({
     selected: [],
     currentName: "idle",
     animations: { idle: { ...DEFAULT_ANIM, tracks: {} } },
+    clip: null,
+    flipMode: "swap",
+    notice: "",
 }));
 
 export const keyId = (boneId: string, frame: number) => `${boneId}|${frame}`;
@@ -76,11 +98,68 @@ const copyAnimData = (d: AnimData): AnimData => ({
     tracks: copyTracks(d.tracks),
 });
 
+const matchCase = (from: string, to: string) =>
+    from === from.toUpperCase() && from.length > 1
+        ? to.toUpperCase()
+        : from[0] === from[0].toUpperCase()
+          ? to[0].toUpperCase() + to.slice(1)
+          : to;
+
+/**
+ * Name of the opposite-side bone: "Arm L" -> "Arm R", "left_leg" -> "right_leg", "hand.R" -> "hand.L",
+ * "LeftArm" -> "RightArm". Returns null when the name has no side marker.
+ */
+export function flipName(name: string): string | null {
+    const flip = (w: string) => {
+        const l = w.toLowerCase();
+        const to =
+            l === "left"
+                ? "right"
+                : l === "right"
+                  ? "left"
+                  : l === "l"
+                    ? "r"
+                    : "l";
+        return matchCase(w, to);
+    };
+    // separated token: "L", "R", "left", "right"
+    const sep = /(^|[\s_.\-])(left|right|l|r)(?=$|[\s_.\-])/i;
+    let m = sep.exec(name);
+    if (m) {
+        const at = m.index + m[1].length;
+        return name.slice(0, at) + flip(m[2]) + name.slice(at + m[2].length);
+    }
+    // camel case: LeftArm, armLeft, RightLeg
+    const camel = /(Left|Right)(?=[A-Z0-9]|$)/;
+    m = camel.exec(name);
+    if (m) {
+        return (
+            name.slice(0, m.index) +
+            flip(m[1]) +
+            name.slice(m.index + m[1].length)
+        );
+    }
+    return null;
+}
+
 /** insert / replace the key at key.frame, keeping the list sorted */
 const putKey = (keys: Key[], key: Key): Key[] =>
     [...keys.filter((k) => k.frame !== key.frame), key].sort(
         (a, b) => a.frame - b.frame,
     );
+
+/**
+ * Blend two angles along the SHORT way round (never more than half a turn), so a key stored as -4.47 rad
+ * behaves like 1.82 rad instead of making the bone spin almost a full turn the other way.
+ * To turn more than half a turn between two keys, put another key in between.
+ */
+export function lerpAngle(a: number, b: number, t: number): number {
+    const TAU = Math.PI * 2;
+    let d = (b - a) % TAU;
+    if (d > Math.PI) d -= TAU;
+    else if (d < -Math.PI) d += TAU;
+    return a + d * t;
+}
 
 /** The pose of a track at frame `f` (holds the first / last key outside the range). Null if there are no keys. */
 export function sample(
@@ -99,7 +178,7 @@ export function sample(
     let t = (f - a.frame) / (b.frame - a.frame);
     if (a.interp === "smooth") t = t * t * (3 - 2 * t);
     return {
-        rot: a.rot + (b.rot - a.rot) * t,
+        rot: lerpAngle(a.rot, b.rot, t),
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
     };
@@ -121,7 +200,19 @@ class Animation {
     private last = 0;
 
     private onKey = (e: KeyboardEvent) => {
-        if (e.ctrlKey || e.metaKey) return;
+        if (e.ctrlKey || e.metaKey) {
+            const t = e.target as HTMLElement | null;
+            if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName)) return;
+            if (useObjectsStore.getState().mode !== "pose") return;
+            if (e.code === "KeyC") {
+                e.preventDefault();
+                this.copyClip();
+            } else if (e.code === "KeyV") {
+                e.preventDefault();
+                this.pasteClip(e.shiftKey);
+            }
+            return;
+        }
         if (useObjectsStore.getState().mode !== "pose") return;
         const st = useAnimationStore.getState();
         if (e.code === "KeyI") {
@@ -525,6 +616,157 @@ class Animation {
             for (const k of moved) newSel.push(keyId(bid, k.frame));
         }
         this.commit(tracks, newSel);
+    }
+
+    // ---------- copy / paste / flip ----------
+
+    selectKeys(ids: string[], additive: boolean) {
+        const cur = useAnimationStore.getState().selected;
+        const next = additive ? [...new Set([...cur, ...ids])] : ids;
+        useAnimationStore.setState({ selected: next });
+    }
+
+    setFlipMode(m: FlipMode) {
+        useAnimationStore.setState({ flipMode: m });
+    }
+
+    /**
+     * Ctrl+C. With keys selected in the timeline: copies those keys (keeping their spacing).
+     * Otherwise copies the CURRENT POSE of the selected bones (all bones when none is selected) as one frame.
+     */
+    copyClip(): boolean {
+        if (!this.builder) return false;
+        const st = useAnimationStore.getState();
+        const reg = this.builder.registry;
+        const out: ClipKey[] = [];
+        let base = 0;
+        if (st.selected.length) {
+            const items = st.selected
+                .map((id) => parseId(id))
+                .filter(([bid]) => reg.get(bid) instanceof Bone);
+            if (!items.length) return false;
+            base = Math.min(...items.map(([, f]) => f));
+            let last = base;
+            for (const [bid, f] of items) {
+                const k = st.tracks[bid]?.find((x) => x.frame === f);
+                const b = reg.get(bid) as Bone;
+                if (!k) continue;
+                last = Math.max(last, f);
+                out.push({
+                    boneId: bid,
+                    name: b.name,
+                    df: f - base,
+                    rot: k.rot,
+                    x: k.x,
+                    y: k.y,
+                    interp: k.interp,
+                });
+            }
+            if (!out.length) return false;
+            useAnimationStore.setState({
+                clip: { keys: out, span: last - base },
+            });
+            return true;
+        }
+        const bones = Bone.selection.size
+            ? [...Bone.selection]
+            : useObjectsStore
+                  .getState()
+                  .objects.filter((o): o is Bone => o instanceof Bone);
+        for (const b of bones) {
+            if (!b.alive) continue;
+            out.push({
+                boneId: b.id,
+                name: b.name,
+                df: 0,
+                rot: b.poseRel,
+                x: b.poseX,
+                y: b.poseY,
+                interp: "linear",
+            });
+        }
+        if (!out.length) return false;
+        useAnimationStore.setState({ clip: { keys: out, span: 0 } });
+        return true;
+    }
+
+    /** the bone a flipped paste puts `name` on: the opposite-side bone, or the bone itself when it has none */
+    private counterpart(boneId: string, name: string): Bone | null {
+        const reg = this.builder?.registry;
+        const self = reg?.get(boneId);
+        const other = flipName(name);
+        if (other) {
+            const found = useObjectsStore
+                .getState()
+                .objects.find(
+                    (o): o is Bone =>
+                        o instanceof Bone && o.alive && o.name === other,
+                );
+            if (found) return found;
+        }
+        return self instanceof Bone && self.alive ? self : null;
+    }
+
+    /** Ctrl+V pastes at the playhead; Ctrl+Shift+V pastes flipped onto the opposite-side bones */
+    pasteClip(flip: boolean) {
+        if (useObjectsStore.getState().mode !== "pose" || !this.builder) return;
+        const st = useAnimationStore.getState();
+        const clip = st.clip;
+        if (!clip) return;
+        const at = Math.max(0, Math.round(st.frame));
+        const tracks = copyTracks(st.tracks);
+        const ids: string[] = [];
+        let end = st.end;
+        let moved = 0;
+        const unpaired: string[] = [];
+        for (const c of clip.keys) {
+            const reg = this.builder.registry.get(c.boneId);
+            const target = flip
+                ? this.counterpart(c.boneId, c.name)
+                : reg instanceof Bone && reg.alive
+                  ? reg
+                  : null;
+            if (!target) continue;
+            if (flip) {
+                if (target.id !== c.boneId) moved++;
+                else if (!unpaired.includes(c.name)) unpaired.push(c.name);
+            }
+            let { rot, x, y } = c;
+            // mirror: the target does the mirror image (turns the other way). A child's x runs along its parent,
+            // so only y flips; a root's x is across the world, so x flips.
+            if (flip && st.flipMode === "mirror") {
+                rot = -rot;
+                if (target.parent) y = -y;
+                else x = -x;
+            }
+            const frame = at + c.df;
+            end = Math.max(end, frame);
+            tracks[target.id] = putKey(tracks[target.id] ?? [], {
+                frame,
+                rot,
+                x,
+                y,
+                interp: c.interp,
+            });
+            ids.push(keyId(target.id, frame));
+        }
+        if (!ids.length) return;
+        if (flip) {
+            const msg =
+                moved === 0
+                    ? `Flip paste: no opposite-side bones found. Name bones with L/R or Left/Right (e.g. "Arm L" / "Arm R").`
+                    : unpaired.length
+                      ? `Flip paste: ${unpaired.join(", ")} has no opposite bone, pasted onto itself.`
+                      : "";
+            useAnimationStore.setState({ notice: msg });
+            if (msg)
+                setTimeout(
+                    () => useAnimationStore.setState({ notice: "" }),
+                    6000,
+                );
+        }
+        if (end !== st.end) useAnimationStore.setState({ end });
+        this.commit(tracks, ids);
     }
 
     /** change how the selected keys blend into the next key */

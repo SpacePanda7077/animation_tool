@@ -6,12 +6,15 @@ import { history } from "./history";
 /**
  * 2-bone IK constraint with target + pole handles.
  *
- * - Target & pole are stored in the **local space of the chain root**
- *   (boneA's parent, or world if boneA is a root), so moving the body
- *   keeps the IK pose consistent.
+ * - Target & pole live in WORLD space: they do not follow the chain's parent
+ *   bone. Move / rotate the body and the target stays planted (the chain just
+ *   re-solves to keep reaching it); only dragging the handles moves them.
+ * - The joint between the two bones (knee / elbow) bends toward the pole: it
+ *   always sits on the same side of the root -> target line as the pole.
  * - Bones under an active IK cannot be rotated/moved manually in pose mode;
  *   only the handles drive them.
- * - Pole defaults to the "front" side of the chain (knee/elbow forward).
+ * - A new IK keeps the chain exactly as it is and puts the pole on the side
+ *   the chain currently bends to.
  */
 
 export type IKState = {
@@ -19,12 +22,12 @@ export type IKState = {
     name: string;
     boneAId: string;
     boneBId: string;
-    /** target in chain-root local space */
-    localTargetX: number;
-    localTargetY: number;
-    /** pole in chain-root local space */
-    localPoleX: number;
-    localPoleY: number;
+    /** target (world) */
+    targetX: number;
+    targetY: number;
+    /** pole (world) */
+    poleX: number;
+    poleY: number;
     enabled: boolean;
 };
 
@@ -58,13 +61,15 @@ export function solve2BoneIK(
 
     const dirToTarget = Math.atan2(dy, dx);
 
-    // Cross product (target-root) × (pole-root) → bend side
+    // Which side of the root -> target line the pole is on (cross product).
+    // The first bone is turned off the root -> target line by midAngle toward that
+    // same side, so the joint (knee / elbow) bends TOWARD the pole.
     const px = poleX - rootX;
     const py = poleY - rootY;
     const cross = dx * py - dy * px;
     const sign = cross >= 0 ? 1 : -1;
 
-    const angleA = dirToTarget - sign * midAngle;
+    const angleA = dirToTarget + sign * midAngle;
     const midX = rootX + Math.cos(angleA) * lenA;
     const midY = rootY + Math.sin(angleA) * lenA;
     const angleB = Math.atan2(targetY - midY, targetX - midX);
@@ -79,15 +84,11 @@ export class IKConstraint {
     boneB: Bone;
     enabled = true;
 
-    /**
-     * Target & pole stored relative to the chain root's frame
-     * (parent of boneA, or world if boneA has no parent).
-     * This way moving the body keeps the IK attached.
-     */
-    localTargetX = 0;
-    localTargetY = 0;
-    localPoleX = 0;
-    localPoleY = 0;
+    /** target & pole in world space (they do not follow any bone) */
+    targetX = 0;
+    targetY = 0;
+    poleX = 0;
+    poleY = 0;
 
     private scene: Scene;
     private targetHandle: GameObjects.Arc;
@@ -108,40 +109,23 @@ export class IKConstraint {
         this.boneA = boneA;
         this.boneB = boneB;
 
-        // Initial target = current tip of boneB (convert to local)
-        const tip = this.worldToLocal(boneB.poll.x, boneB.poll.y);
-        this.localTargetX = tip.x;
-        this.localTargetY = tip.y;
-
-        // Initial pole = in FRONT of the chain (knee/elbow forward).
-        // "Front" = opposite of the previous default: flip the perpendicular.
-        const mx = (boneA.pivot.x + boneB.poll.x) / 2;
-        const my = (boneA.pivot.y + boneB.poll.y) / 2;
-        const dx = boneB.poll.x - boneA.pivot.x;
-        const dy = boneB.poll.y - boneA.pivot.y;
-        const len = Math.hypot(dx, dy) || 1;
-        // Flipped perpendicular so pole sits in front of the knee/elbow
-        const worldPoleX = mx + (dy / len) * 60;
-        const worldPoleY = my - (dx / len) * 60;
-        const poleLocal = this.worldToLocal(worldPoleX, worldPoleY);
-        this.localPoleX = poleLocal.x;
-        this.localPoleY = poleLocal.y;
-
-        const worldTarget = this.localToWorld(
-            this.localTargetX,
-            this.localTargetY,
-        );
-        const worldPole = this.localToWorld(this.localPoleX, this.localPoleY);
+        // Initial target = current tip of boneB, pole on the side the chain bends to now,
+        // so creating the IK doesn't change the pose.
+        this.targetX = boneB.poll.x;
+        this.targetY = boneB.poll.y;
+        const pole = this.defaultPole();
+        this.poleX = pole.x;
+        this.poleY = pole.y;
 
         this.targetHandle = scene.add
-            .circle(worldTarget.x, worldTarget.y, 8, 0x4caf50)
+            .circle(this.targetX, this.targetY, 8, 0x4caf50)
             .setDepth(Bone.DEPTH + 20)
             .setInteractive({ draggable: true })
             .setData("ik", this)
             .setData("ik-role", "target");
 
         this.poleHandle = scene.add
-            .circle(worldPole.x, worldPole.y, 6, 0x9c27b0)
+            .circle(this.poleX, this.poleY, 6, 0x9c27b0)
             .setDepth(Bone.DEPTH + 20)
             .setInteractive({ draggable: true })
             .setData("ik", this)
@@ -156,9 +140,8 @@ export class IKConstraint {
         });
         this.targetHandle.on("drag", (p: Input.Pointer) => {
             if (Bone.mode !== "pose" || !this.enabled) return;
-            const local = this.worldToLocal(p.worldX, p.worldY);
-            this.localTargetX = local.x;
-            this.localTargetY = local.y;
+            this.targetX = p.worldX;
+            this.targetY = p.worldY;
             this.solve();
             this.draw();
         });
@@ -171,9 +154,8 @@ export class IKConstraint {
         });
         this.poleHandle.on("drag", (p: Input.Pointer) => {
             if (Bone.mode !== "pose" || !this.enabled) return;
-            const local = this.worldToLocal(p.worldX, p.worldY);
-            this.localPoleX = local.x;
-            this.localPoleY = local.y;
+            this.poleX = p.worldX;
+            this.poleY = p.worldY;
             this.solve();
             this.draw();
         });
@@ -187,42 +169,51 @@ export class IKConstraint {
         IKConstraint.all.push(this);
     }
 
-    // ---------- chain-root frame helpers ----------
+    // ---------- bend side ----------
 
-    /** The bone whose frame we treat as "local" for target/pole. */
-    private chainRoot(): Bone | null {
-        return this.boneA.parent; // null → world
+    /** Cross product of (root -> tip) and (root -> knee): > 0 / < 0 = which side the chain bends to now. */
+    private kneeCross(): number {
+        const r = this.getChainRootWorld();
+        const dx = this.boneB.poll.x - r.x;
+        const dy = this.boneB.poll.y - r.y;
+        const kx = this.boneA.poll.x - r.x;
+        const ky = this.boneA.poll.y - r.y;
+        return dx * ky - dy * kx;
     }
 
-    private worldToLocal(wx: number, wy: number): { x: number; y: number } {
-        const root = this.chainRoot();
-        if (!root) return { x: wx, y: wy };
-        // Prefer setup-ish position: use pivot of parent
-        const ox = root.pivot.x;
-        const oy = root.pivot.y;
-        const a = root.angle;
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        const dx = wx - ox;
-        const dy = wy - oy;
+    /** A pole position next to the knee, on the side the chain currently bends to. */
+    private defaultPole(): { x: number; y: number } {
+        const r = this.getChainRootWorld();
+        const dx = this.boneB.poll.x - r.x;
+        const dy = this.boneB.poll.y - r.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const side = this.kneeCross() >= 0 ? 1 : -1;
+        // (-dy, dx) is the perpendicular on the positive-cross side
         return {
-            x: dx * c + dy * s,
-            y: -dx * s + dy * c,
+            x: this.boneA.poll.x + side * (-dy / len) * 60,
+            y: this.boneA.poll.y + side * (dx / len) * 60,
         };
     }
 
-    private localToWorld(lx: number, ly: number): { x: number; y: number } {
-        const root = this.chainRoot();
-        if (!root) return { x: lx, y: ly };
-        const ox = root.pivot.x;
-        const oy = root.pivot.y;
-        const a = root.angle;
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        return {
-            x: ox + lx * c - ly * s,
-            y: oy + lx * s + ly * c,
-        };
+    /**
+     * Put the target on the chain's current tip (and fix the pole if it is on the wrong side of a bent chain).
+     * Called when entering pose mode, so changes made in setup mode don't make the chain jump to an old target.
+     */
+    private anchor() {
+        if (this.destroyed || !this.enabled) return;
+        this.targetX = this.boneB.poll.x;
+        this.targetY = this.boneB.poll.y;
+        const knee = this.kneeCross();
+        if (Math.abs(knee) < 1) return; // straight chain: keep the pole where it is
+        const r = this.getChainRootWorld();
+        const pc =
+            (this.targetX - r.x) * (this.poleY - r.y) -
+            (this.targetY - r.y) * (this.poleX - r.x);
+        if (pc >= 0 !== knee > 0) {
+            const pole = this.defaultPole();
+            this.poleX = pole.x;
+            this.poleY = pole.y;
+        }
     }
 
     /** World position of boneA's pivot using only parent transforms (pose of A/B ignored). */
@@ -299,18 +290,16 @@ export class IKConstraint {
         if (!this.boneA.alive || !this.boneB.alive) return;
 
         const root = this.getChainRootWorld();
-        const target = this.localToWorld(this.localTargetX, this.localTargetY);
-        const pole = this.localToWorld(this.localPoleX, this.localPoleY);
 
         const result = solve2BoneIK(
             root.x,
             root.y,
             this.boneA.length,
             this.boneB.length,
-            target.x,
-            target.y,
-            pole.x,
-            pole.y,
+            this.targetX,
+            this.targetY,
+            this.poleX,
+            this.poleY,
         );
         if (!result) return;
 
@@ -345,11 +334,8 @@ export class IKConstraint {
     draw() {
         if (this.destroyed) return;
 
-        const target = this.localToWorld(this.localTargetX, this.localTargetY);
-        const pole = this.localToWorld(this.localPoleX, this.localPoleY);
-
-        this.targetHandle.setPosition(target.x, target.y);
-        this.poleHandle.setPosition(pole.x, pole.y);
+        this.targetHandle.setPosition(this.targetX, this.targetY);
+        this.poleHandle.setPosition(this.poleX, this.poleY);
 
         const visible = Bone.mode === "pose" && this.enabled;
         this.targetHandle.setVisible(visible);
@@ -359,25 +345,23 @@ export class IKConstraint {
         this.line.clear();
         if (!visible) return;
 
-        // Pole guide line (mid of chain → pole)
-        const midX = (this.boneA.pivot.x + this.boneB.poll.x) / 2;
-        const midY = (this.boneA.pivot.y + this.boneB.poll.y) / 2;
+        // Pole guide line (knee / elbow → pole): the joint bends toward this
         this.line.lineStyle(1, 0x9c27b0, 0.6);
         this.line.beginPath();
-        this.line.moveTo(midX, midY);
-        this.line.lineTo(pole.x, pole.y);
+        this.line.moveTo(this.boneA.poll.x, this.boneA.poll.y);
+        this.line.lineTo(this.poleX, this.poleY);
         this.line.strokePath();
 
         // Target guide (tip → target)
         this.line.lineStyle(1, 0x4caf50, 0.4);
         this.line.beginPath();
         this.line.moveTo(this.boneB.poll.x, this.boneB.poll.y);
-        this.line.lineTo(target.x, target.y);
+        this.line.lineTo(this.targetX, this.targetY);
         this.line.strokePath();
     }
 
     /**
-     * Call after the body / chain root has moved so handles & solve stay in sync.
+     * Call after the body / chain root has moved so the chain re-solves toward its (world) target.
      * Safe to call every frame or after any layout.
      */
     sync() {
@@ -386,7 +370,7 @@ export class IKConstraint {
             this.draw();
             return;
         }
-        // Re-solve so bones follow the (local) target after parent moved
+        // Re-solve so the chain keeps reaching its world target after the parent moved
         if (!this.dragging) {
             this.solve();
         }
@@ -399,10 +383,10 @@ export class IKConstraint {
             name: this.name,
             boneAId: this.boneA.id,
             boneBId: this.boneB.id,
-            localTargetX: this.localTargetX,
-            localTargetY: this.localTargetY,
-            localPoleX: this.localPoleX,
-            localPoleY: this.localPoleY,
+            targetX: this.targetX,
+            targetY: this.targetY,
+            poleX: this.poleX,
+            poleY: this.poleY,
             enabled: this.enabled,
         };
     }
@@ -423,7 +407,10 @@ export class IKConstraint {
     }
 
     static refreshAll() {
-        for (const c of IKConstraint.all) c.draw();
+        for (const c of IKConstraint.all) {
+            if (Bone.mode === "pose") c.anchor();
+            c.draw();
+        }
     }
 
     /** Re-solve every IK after hierarchy / body movement. */

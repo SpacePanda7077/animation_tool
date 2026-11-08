@@ -1,7 +1,11 @@
 import { Bone } from "../game/game-components/objects/objetcs/Bone";
 import { Rect } from "../game/game-components/objects/objetcs/Rect";
 import { useObjectsStore } from "../store/object-store";
-import { sample, useAnimationStore, type AnimData } from "../game/game-components/animation";
+import {
+    sample,
+    useAnimationStore,
+    type AnimData,
+} from "../game/game-components/animation";
 import type {
     ExportAnimation,
     ExportBone,
@@ -26,7 +30,13 @@ export type ExportResult = {
     json: string;
     /** things worth knowing before you use the file (renamed duplicates, empty animation, ...) */
     warnings: string[];
-    stats: { bones: number; parts: number; keys: number; seconds: number; animations: number };
+    stats: {
+        bones: number;
+        parts: number;
+        keys: number;
+        seconds: number;
+        animations: number;
+    };
 };
 
 /** round away float noise (1e-6 of a pixel / radian) */
@@ -43,7 +53,9 @@ function uniqueNames(names: string[], kind: string, warnings: string[]) {
         for (let i = 2; used.has(out); i++) out = `${name} ${i}`;
         used.add(out);
         if (out !== name)
-            warnings.push(`Two ${kind} were called "${name}"; the second one is exported as "${out}".`);
+            warnings.push(
+                `Two ${kind} were called "${name}"; the second one is exported as "${out}".`,
+            );
         return out;
     });
 }
@@ -85,11 +97,26 @@ function buildOneAnimation(
                 interp: k.interp,
             }));
         }
+        // make the rotations continuous (each key within half a turn of the one before), so a game that
+        // blends them with plain linear interpolation gets the same short-way-round motion as the editor
+        let prev: number | null = null;
+        for (const k of out) {
+            if (prev !== null) {
+                const TAU = Math.PI * 2;
+                let d = (k.rotation - prev) % TAU;
+                if (d > Math.PI) d -= TAU;
+                else if (d < -Math.PI) d += TAU;
+                k.rotation = prev + d;
+            }
+            prev = k.rotation;
+        }
         animBones[boneNames.get(bone)!] = out;
         keyCount += out.length;
     }
     if (Object.keys(animBones).length === 0)
-        warnings.push("An animation has no keyframes yet, so only the skeleton is exported for it.");
+        warnings.push(
+            "An animation has no keyframes yet, so only the skeleton is exported for it.",
+        );
 
     return {
         animation: {
@@ -127,7 +154,9 @@ export function buildExport(options: ExportOptions): ExportResult {
     };
 
     // ---------- bones (parents first) ----------
-    const allBones = objects.filter((o): o is Bone => o instanceof Bone && o.alive);
+    const allBones = objects.filter(
+        (o): o is Bone => o instanceof Bone && o.alive,
+    );
     const ordered: Bone[] = [];
     const walk = (b: Bone) => {
         ordered.push(b);
@@ -271,7 +300,9 @@ export const fileNameFor = (name: string) =>
 
 /** save text as a file through the browser */
 export function downloadText(text: string, fileName: string) {
-    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const url = URL.createObjectURL(
+        new Blob([text], { type: "application/json" }),
+    );
     const a = document.createElement("a");
     a.href = url;
     a.download = fileName;

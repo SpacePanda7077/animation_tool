@@ -7,12 +7,15 @@ import { history } from "../game-components/history";
 import { animation } from "../game-components/animation";
 import { IKConstraint, addIKFromSelection } from "../game-components/ik";
 import { useObjectsStore } from "../../store/object-store";
+import { Rect } from "../game-components/objects/objetcs/Rect";
+import { BoxSelect } from "../game-components/box-select";
 
 export class Game extends Scene {
     objectBuilder: ObjectBuilder;
     EventHandler: EventHandler;
     grid: Grid;
     private unsubMode: (() => void) | null = null;
+    private boxSelect: BoxSelect | null = null;
 
     constructor() {
         super("Game");
@@ -80,6 +83,7 @@ export class Game extends Scene {
         this.objectBuilder = new ObjectBuilder(this, this.grid);
         this.EventHandler = new EventHandler(this.objectBuilder);
         this.EventHandler.handleEvents();
+        this.boxSelect = new BoxSelect(this);
         animation.init(this, this.objectBuilder);
         history.init(this, this.objectBuilder);
 
@@ -103,6 +107,9 @@ export class Game extends Scene {
 
         const cleanup = () => {
             this.EventHandler.destroy();
+            this.boxSelect?.destroy();
+            this.boxSelect = null;
+            Rect.setGroup([]);
             animation.destroy();
             history.destroy();
             IKConstraint.destroyAll();
@@ -115,4 +122,3 @@ export class Game extends Scene {
         this.events.on("destroy", cleanup);
     }
 }
-

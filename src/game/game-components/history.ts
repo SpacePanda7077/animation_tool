@@ -157,6 +157,10 @@ class History {
         const prev = this.undoStack.pop();
         if (!prev || !this.head) return;
         this.redoStack.push(this.head);
+        // DEBUG: remove once the "undo wipes everything" bug is understood
+        console.log(
+            `[history] undo: going back to a state with ${prev.bones.length} bones, ${prev.rects.length} rects, mode ${prev.mode}; steps left ${this.undoStack.length}; holds ${this.holds}`,
+        );
         this.apply(prev);
     }
 
@@ -172,6 +176,8 @@ class History {
         this.restoring = true;
         try {
             this.restore(snap);
+        } catch (err) {
+            console.error("[history] restore failed", err);
         } finally {
             this.restoring = false;
         }
