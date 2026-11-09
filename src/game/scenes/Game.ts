@@ -101,7 +101,23 @@ export class Game extends Scene {
         });
         this.unsubMode = useObjectsStore.subscribe((s, prev) => {
             if (s.mode !== prev.mode) IKConstraint.refreshAll();
+            // redraw the white ring when a target / pole gets picked or dropped
+            else if (s.selectedIK !== prev.selectedIK)
+                IKConstraint.all.forEach((c) => c.draw());
         });
+        // clicking anything that isn't an IK handle drops the IK selection
+        this.input.on(
+            "pointerdown",
+            (
+                p: Phaser.Input.Pointer,
+                over: Phaser.GameObjects.GameObject[],
+            ) => {
+                if (((p.event as MouseEvent).button ?? 0) !== 0) return;
+                if (over.some((o) => o.getData?.("ik"))) return;
+                if (useObjectsStore.getState().selectedIK)
+                    useObjectsStore.getState().setSelectedIK(null);
+            },
+        );
 
         EventBus.emit("current-scene-ready", this);
 

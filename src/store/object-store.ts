@@ -1,8 +1,17 @@
 import { create } from "zustand";
 import { Rect } from "../game/game-components/objects/objetcs/Rect";
-import { Bone, type BoneMode } from "../game/game-components/objects/objetcs/Bone";
+import {
+    Bone,
+    type BoneMode,
+} from "../game/game-components/objects/objetcs/Bone";
 
 export type Obj = Rect | Bone;
+
+/** an IK constraint, or its target / pole, picked in the layers list or on the canvas */
+export type IKSelection = {
+    ik: import("../game/game-components/ik").IKConstraint;
+    part: "ik" | "target" | "pole";
+};
 
 /** a root = not inside any hierarchy (a bone without a parent, a rect not attached to a bone) */
 export const isRoot = (o: Obj) =>
@@ -47,6 +56,9 @@ type object_store_type = {
     /** the object shown in the properties panel (for bones: the active bone) */
     selected: Obj | null;
     setSelected: (obj: Obj | null) => void;
+    /** an IK / its target / its pole is shown in the properties panel (then `selected` is empty) */
+    selectedIK: IKSelection | null;
+    setSelectedIK: (sel: IKSelection | null) => void;
 
     /** bumped whenever a game object's numbers change, so the panel re-reads them */
     version: number;
@@ -84,7 +96,10 @@ export const useObjectsStore = create<object_store_type>((set, get) => ({
 
     reorderRect: (dragged, target, position) => {
         if (dragged === target) return;
-        if (get().mode === "setup" && dragged.parentBone !== target.parentBone) {
+        if (
+            get().mode === "setup" &&
+            dragged.parentBone !== target.parentBone
+        ) {
             if (target.parentBone) dragged.attach(target.parentBone);
             else dragged.detach();
         }
@@ -143,7 +158,18 @@ export const useObjectsStore = create<object_store_type>((set, get) => ({
 
     selected: null,
     setSelected: (obj) =>
-        set((s) => ({ selected: obj, version: s.version + 1 })),
+        set((s) => ({
+            selected: obj,
+            selectedIK: obj ? null : s.selectedIK,
+            version: s.version + 1,
+        })),
+    selectedIK: null,
+    setSelectedIK: (sel) =>
+        set((s) => ({
+            selectedIK: sel,
+            selected: sel ? null : s.selected,
+            version: s.version + 1,
+        })),
 
     version: 0,
     bump: () => set((s) => ({ version: s.version + 1 })),

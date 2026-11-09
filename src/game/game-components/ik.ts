@@ -84,6 +84,10 @@ export class IKConstraint {
     boneB: Bone;
     enabled = true;
 
+    /** custom names of the target / pole; null = "<IK name> target" / "<IK name> pole" */
+    private customTarget: string | null = null;
+    private customPole: string | null = null;
+
     /** target & pole in world space (they do not follow any bone) */
     targetX = 0;
     targetY = 0;
@@ -123,6 +127,7 @@ export class IKConstraint {
             .setInteractive({ draggable: true })
             .setData("ik", this)
             .setData("ik-role", "target");
+        this.targetHandle.on("pointerdown", () => this.select("target"));
 
         this.poleHandle = scene.add
             .circle(this.poleX, this.poleY, 6, 0x9c27b0)
@@ -130,6 +135,7 @@ export class IKConstraint {
             .setInteractive({ draggable: true })
             .setData("ik", this)
             .setData("ik-role", "pole");
+        this.poleHandle.on("pointerdown", () => this.select("pole"));
 
         this.line = scene.add.graphics().setDepth(Bone.DEPTH + 15);
 
@@ -167,6 +173,62 @@ export class IKConstraint {
         this.solve();
         this.draw();
         IKConstraint.all.push(this);
+    }
+
+    // ---------- names / selection ----------
+
+    /** name of the target object ("Left leg target" unless you renamed it) */
+    get targetName(): string {
+        return this.customTarget ?? `${this.name} target`;
+    }
+    /** name of the pole object */
+    get poleName(): string {
+        return this.customPole ?? `${this.name} pole`;
+    }
+
+    setName(v: string) {
+        const t = v.trim();
+        if (!t) return;
+        this.name = t;
+        useObjectsStore.getState().bump();
+    }
+    setTargetName(v: string) {
+        const t = v.trim();
+        if (!t) return;
+        this.customTarget = t;
+        useObjectsStore.getState().bump();
+    }
+    setPoleName(v: string) {
+        const t = v.trim();
+        if (!t) return;
+        this.customPole = t;
+        useObjectsStore.getState().bump();
+    }
+
+    /** type exact numbers (pose mode: the chain follows right away) */
+    setTargetPos(x: number, y: number) {
+        this.targetX = x;
+        this.targetY = y;
+        this.solve();
+        this.draw();
+        useObjectsStore.getState().bump();
+    }
+    setPolePos(x: number, y: number) {
+        this.poleX = x;
+        this.poleY = y;
+        this.solve();
+        this.draw();
+        useObjectsStore.getState().bump();
+    }
+
+    select(part: "ik" | "target" | "pole" = "ik") {
+        useObjectsStore.getState().setSelectedIK({ ik: this, part });
+        this.draw();
+    }
+
+    private isSelected(part: "target" | "pole") {
+        const s = useObjectsStore.getState().selectedIK;
+        return !!s && s.ik === this && s.part === part;
     }
 
     // ---------- bend side ----------
@@ -336,6 +398,15 @@ export class IKConstraint {
 
         this.targetHandle.setPosition(this.targetX, this.targetY);
         this.poleHandle.setPosition(this.poleX, this.poleY);
+        // the picked one gets a white ring
+        this.targetHandle.setStrokeStyle(
+            this.isSelected("target") ? 3 : 0,
+            0xffffff,
+        );
+        this.poleHandle.setStrokeStyle(
+            this.isSelected("pole") ? 3 : 0,
+            0xffffff,
+        );
 
         const visible = Bone.mode === "pose" && this.enabled;
         this.targetHandle.setVisible(visible);
@@ -406,6 +477,8 @@ export class IKConstraint {
     destroy() {
         if (this.destroyed) return;
         this.destroyed = true;
+        const st = useObjectsStore.getState();
+        if (st.selectedIK?.ik === this) st.setSelectedIK(null);
         this.targetHandle.destroy();
         this.poleHandle.destroy();
         this.line.destroy();

@@ -62,6 +62,10 @@ export type ExportIK = {
     boneB: string;
     /** which way the middle joint (knee / elbow) bends: the side of the root -> target line the pole was on, 1 or -1 */
     bend: 1 | -1;
+    /** name of the target object in the editor ("Left leg target"); older files don't have it, then it is "<name> target" */
+    target?: string;
+    /** name of the pole object in the editor ("Left leg pole") */
+    pole?: string;
 };
 
 export type ExportKey = {

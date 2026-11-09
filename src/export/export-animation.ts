@@ -264,11 +264,23 @@ export function buildExport(options: ExportOptions): ExportResult {
         "IK constraints",
         warnings,
     );
+    const targetNames = uniqueNames(
+        liveIK.map((c) => c.targetName),
+        "IK targets",
+        warnings,
+    );
+    const poleNames = uniqueNames(
+        liveIK.map((c) => c.poleName),
+        "IK poles",
+        warnings,
+    );
     const ik: ExportIK[] = liveIK.map((c, i) => ({
         name: ikNames[i],
         boneA: boneNames.get(c.boneA)!,
         boneB: boneNames.get(c.boneB)!,
         bend: c.bendSign(),
+        target: targetNames[i],
+        pole: poleNames[i],
     }));
 
     // ---------- animations ----------
@@ -341,4 +353,3 @@ export function downloadText(text: string, fileName: string) {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-

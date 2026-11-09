@@ -3,6 +3,8 @@ import { isRoot, Obj, useObjectsStore } from "../../store/object-store";
 import { Rect } from "../../game/game-components/objects/objetcs/Rect";
 import { Sprite } from "../../game/game-components/objects/objetcs/Sprite";
 import { Bone } from "../../game/game-components/objects/objetcs/Bone";
+import { IKConstraint } from "../../game/game-components/ik";
+import { EventBus } from "../../game/EventBus";
 
 const fmt = (v: number) => String(Math.round(v * 100) / 100);
 /** wrap degrees into -180..180 for display */
@@ -34,6 +36,7 @@ type Zone = "before" | "after" | "inside";
 function Layers() {
     const objects = useObjectsStore((s) => s.objects);
     const selected = useObjectsStore((s) => s.selected);
+    const selectedIK = useObjectsStore((s) => s.selectedIK);
     const reorderRect = useObjectsStore((s) => s.reorderRect);
     const attachRect = useObjectsStore((s) => s.attachRect);
     const reparentBone = useObjectsStore((s) => s.reparentBone);
@@ -180,6 +183,43 @@ function Layers() {
         );
     };
 
+    /** an IK, then its target and pole (named objects: find them in the game by these names) */
+    const ikRow = (
+        key: string,
+        icon: string,
+        label: string,
+        depth: number,
+        active: boolean,
+        onClick: () => void,
+        onDelete?: () => void,
+    ) => (
+        <div
+            key={key}
+            onClick={onClick}
+            style={{ marginLeft: depth * 16 }}
+            className={[
+                "px-3 py-1.5 rounded-md text-white cursor-pointer select-none border-2 border-transparent text-sm flex items-center gap-2",
+                active ? "bg-[#4c4747]" : "bg-[#3a3737]",
+            ].join(" ")}
+        >
+            <span className="text-[#878080]">{icon}</span>
+            <span className="flex-1 truncate">{label}</span>
+            {onDelete && (
+                <button
+                    title="Delete this IK"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete();
+                    }}
+                    className="opacity-60 hover:opacity-100"
+                >
+                    ✕
+                </button>
+            )}
+        </div>
+    );
+    const iks = IKConstraint.all;
+
     const dragNested = setup && dragging !== null && !isRoot(dragging);
 
     return (
@@ -191,6 +231,35 @@ function Layers() {
                 below another puts it in that one's group.
             </div>
             {rootBones.map((o) => renderNode(o, 0))}
+            {iks.map((c) => (
+                <div key={c.id} className="flex flex-col gap-1">
+                    {ikRow(
+                        c.id,
+                        "🦾",
+                        c.name,
+                        0,
+                        selectedIK?.ik === c && selectedIK.part === "ik",
+                        () => c.select("ik"),
+                        () => EventBus.emit("delete-ik", c.id),
+                    )}
+                    {ikRow(
+                        c.id + "t",
+                        "🎯",
+                        c.targetName,
+                        1,
+                        selectedIK?.ik === c && selectedIK.part === "target",
+                        () => c.select("target"),
+                    )}
+                    {ikRow(
+                        c.id + "p",
+                        "◆",
+                        c.poleName,
+                        1,
+                        selectedIK?.ik === c && selectedIK.part === "pole",
+                        () => c.select("pole"),
+                    )}
+                </div>
+            ))}
             {rootRects.map((o) => renderNode(o, 0))}
 
             {/* empty space at the bottom: drop here to take an item out of its hierarchy */}
@@ -224,9 +293,80 @@ function Layers() {
 
 function Properties() {
     const selected = useObjectsStore((s) => s.selected);
+    const selectedIK = useObjectsStore((s) => s.selectedIK);
     const unparent = useObjectsStore((s) => s.unparent);
     const posing = useObjectsStore((s) => s.mode) === "pose";
     useObjectsStore((s) => s.version); // re-render whenever the game object changes
+
+    if (selectedIK) {
+        const { ik, part } = selectedIK;
+        if (part === "ik") {
+            return (
+                <div className="flex flex-col gap-3">
+                    <NameField
+                        key={ik.id}
+                        value={ik.name}
+                        onCommit={(v) => ik.setName(v)}
+                    />
+                    <Group label="Chain">
+                        <Info label="Upper bone" value={ik.boneA.name} />
+                        <Info label="Lower bone" value={ik.boneB.name} />
+                    </Group>
+                    <Group label="Objects (names used in your game)">
+                        <Info label="Target" value={ik.targetName} />
+                        <Info label="Pole" value={ik.poleName} />
+                    </Group>
+                    <div className="text-[11px] text-[#878080]">
+                        In Phaser: hero.getIKTarget("{ik.targetName}") and
+                        hero.getIKPole("{ik.poleName}") give you objects the
+                        chain follows.
+                    </div>
+                </div>
+            );
+        }
+        const isTarget = part === "target";
+        return (
+            <div className="flex flex-col gap-3">
+                <NameField
+                    key={ik.id + part}
+                    value={isTarget ? ik.targetName : ik.poleName}
+                    onCommit={(v) =>
+                        isTarget ? ik.setTargetName(v) : ik.setPoleName(v)
+                    }
+                />
+                <Group label="Position (world)">
+                    <NumberField
+                        label="X"
+                        value={isTarget ? ik.targetX : ik.poleX}
+                        disabled={!posing}
+                        onCommit={(v) =>
+                            isTarget
+                                ? ik.setTargetPos(v, ik.targetY)
+                                : ik.setPolePos(v, ik.poleY)
+                        }
+                    />
+                    <NumberField
+                        label="Y"
+                        value={isTarget ? ik.targetY : ik.poleY}
+                        disabled={!posing}
+                        onCommit={(v) =>
+                            isTarget
+                                ? ik.setTargetPos(ik.targetX, v)
+                                : ik.setPolePos(ik.poleX, v)
+                        }
+                    />
+                </Group>
+                <Info label="Belongs to" value={ik.name} />
+                <div className="text-[11px] text-[#878080]">
+                    {posing
+                        ? isTarget
+                            ? "Drag the green dot, or type a position. The chain reaches it."
+                            : "Drag the purple dot, or type a position. The knee / elbow bends towards it."
+                        : "Switch to pose mode to move it."}
+                </div>
+            </div>
+        );
+    }
 
     if (!selected) {
         return <div className="text-xs text-[#878080]">Nothing selected.</div>;
