@@ -6,6 +6,7 @@ import { Grid } from "../game-components/grid";
 import { history } from "../game-components/history";
 import { animation } from "../game-components/animation";
 import { IKConstraint, addIKFromSelection } from "../game-components/ik";
+import { initProjectPersistence } from "../game-components/project";
 import { useObjectsStore } from "../../store/object-store";
 import { Rect } from "../game-components/objects/objetcs/Rect";
 import { BoxSelect } from "../game-components/box-select";
@@ -86,6 +87,8 @@ export class Game extends Scene {
         this.boxSelect = new BoxSelect(this);
         animation.init(this, this.objectBuilder);
         history.init(this, this.objectBuilder);
+        // Register scene for manual Save / Load (no auto-restore on refresh)
+        initProjectPersistence(this, this.objectBuilder);
 
         // IK: create from UI, refresh handles on mode change
         EventBus.on("add-ik", () => {
@@ -138,3 +141,4 @@ export class Game extends Scene {
         this.events.on("destroy", cleanup);
     }
 }
+

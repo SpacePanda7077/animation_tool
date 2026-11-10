@@ -1,7 +1,11 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { EventBus } from "../../game/EventBus";
 import { useObjectsStore } from "../../store/object-store";
 import { history, useHistoryStore } from "../../game/game-components/history";
+import {
+    uiSaveProject,
+    uiLoadProject,
+} from "../../game/game-components/project";
 
 export default function Tab() {
     const mode = useObjectsStore((s) => s.mode);
@@ -11,6 +15,7 @@ export default function Tab() {
     const canUndo = useHistoryStore((s) => s.canUndo);
     const canRedo = useHistoryStore((s) => s.canRedo);
     const hasSelection = useObjectsStore((s) => s.selected) !== null;
+    const [saveMsg, setSaveMsg] = useState("");
 
     const handle_add_rect = () => {
         EventBus.emit("add_rect");
@@ -27,6 +32,19 @@ export default function Tab() {
     };
     const handle_duplicate = () => {
         EventBus.emit("duplicate");
+    };
+    const handle_save = async () => {
+        const msg = await uiSaveProject();
+        setSaveMsg(msg);
+        setTimeout(() => setSaveMsg(""), 2000);
+    };
+    const handle_load = async () => {
+        const result = await uiLoadProject();
+        setSaveMsg(result.message);
+        if (result.warnings.length) {
+            console.warn("[project]", result.warnings);
+        }
+        setTimeout(() => setSaveMsg(""), 2000);
     };
 
     const modeButton = (m: "setup" | "pose", label: string) => (
@@ -77,6 +95,27 @@ export default function Tab() {
                         >
                             redo
                         </button>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                        <button
+                            title="Save project to a file (first time picks location, then overwrites)"
+                            onClick={handle_save}
+                            className={small(true)}
+                        >
+                            save
+                        </button>
+                        <button
+                            title="Load a project JSON file"
+                            onClick={handle_load}
+                            className={small(true)}
+                        >
+                            load
+                        </button>
+                        {saveMsg && (
+                            <span className="text-[11px] text-[#ffd54f]">
+                                {saveMsg}
+                            </span>
+                        )}
                     </div>
                     <button
                         onClick={handle_add_rect}
