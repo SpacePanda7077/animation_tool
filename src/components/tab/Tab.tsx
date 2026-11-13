@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EventBus } from "../../game/EventBus";
 import { useObjectsStore } from "../../store/object-store";
 import { history, useHistoryStore } from "../../game/game-components/history";
@@ -16,6 +16,13 @@ export default function Tab() {
     const canRedo = useHistoryStore((s) => s.canRedo);
     const hasSelection = useObjectsStore((s) => s.selected) !== null;
     const [saveMsg, setSaveMsg] = useState("");
+    const [ghost, setGhost] = useState(false);
+    useEffect(() => {
+        EventBus.on("ghost-changed", setGhost);
+        return () => {
+            EventBus.off("ghost-changed", setGhost);
+        };
+    }, []);
 
     const handle_add_rect = () => {
         EventBus.emit("add_rect");
@@ -146,6 +153,13 @@ export default function Tab() {
                         className={addClass(setup)}
                     >
                         bone
+                    </button>
+                    <button
+                        title="B: bones and IK handles go faint and stop catching clicks, so you can pick and move the images under them. Mouse wheel zooms; Alt+click picks the image underneath."
+                        onClick={() => EventBus.emit("toggle-ghost")}
+                        className={addClass(true)}
+                    >
+                        {ghost ? "show bones (B)" : "ghost bones (B)"}
                     </button>
                     <button
                         title="Shift+D: copies the selected rectangle or sprite, or the selected bones with their children and attached rectangles / sprites"

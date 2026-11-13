@@ -1,4 +1,4 @@
-import { Scene, GameObjects } from "phaser";
+import { Scene, GameObjects, Geom } from "phaser";
 import { Rect, type RectState } from "./Rect";
 import type { sprite_config } from "../configuration";
 
@@ -18,6 +18,9 @@ export class Sprite extends Rect {
     /** key of the Phaser texture (= the image's file name); this is also the name written to the export */
     textureKey: string;
 
+    /** true = clicks pass through the see-through parts of an image (to whatever is below it) */
+    static pixelPicking = true;
+
     constructor(scene: Scene, config: sprite_config) {
         // Rect's constructor already calls updateHandles(); syncImage() ignores that call because there is no image yet
         super(scene, {
@@ -35,6 +38,46 @@ export class Sprite extends Rect {
 
         this.image = scene.add.image(config.x, config.y, config.texture);
         this.syncImage();
+
+        // pixel-perfect picking: only the visible part of the picture can be clicked
+        const input = this.rect.input;
+        if (input) {
+            input.hitAreaCallback = (
+                area: Geom.Rectangle,
+                x: number,
+                y: number,
+            ) =>
+                Geom.Rectangle.Contains(area, x, y) &&
+                (!Sprite.pixelPicking || this.opaqueAt(x, y));
+        }
+    }
+
+    /** x, y are in the rectangle's own (unscaled) space; a few pixels of slack so tiny images stay easy to grab */
+    private opaqueAt(x: number, y: number): boolean {
+        try {
+            const tex = this.scene.textures;
+            const frame = tex.getFrame(this.textureKey);
+            if (!frame) return true;
+            const sx = frame.width / this.rect.width;
+            const sy = frame.height / this.rect.height;
+            const tx = Math.floor(x * sx);
+            const ty = Math.floor(y * sy);
+            const d = 2;
+            for (const [ox, oy] of [
+                [0, 0],
+                [d, 0],
+                [-d, 0],
+                [0, d],
+                [0, -d],
+            ]) {
+                const a = tex.getPixelAlpha(tx + ox, ty + oy, this.textureKey);
+                if (a === null) return true; // can't read pixels: behave like a plain rectangle
+                if (a > 10) return true;
+            }
+            return false;
+        } catch {
+            return true;
+        }
     }
 
     /** put the image where the rectangle is */

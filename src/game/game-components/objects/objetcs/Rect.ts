@@ -67,6 +67,18 @@ export class Rect implements BoneAttachment {
         Rect.group = next;
     }
 
+    /** world units per screen pixel (1 / zoom): the scale / rotate handles keep their size on screen */
+    static ui = 1;
+    /** set while an Alt+click picked a rect that is underneath the clicked one, so it isn't deselected right away */
+    static forced: Rect | null = null;
+
+    /** restyle every handle after a zoom change */
+    static setUi(ui: number) {
+        Rect.ui = ui;
+        for (const r of Rect.instances) if (r.alive) r.updateHandles();
+    }
+    private static instances = new Set<Rect>();
+
     /** hidden rects are not drawn and can't be selected */
     hidden = false;
     /** false = removed from the scene (e.g. undo of a create), kept around so redo can bring it back */
@@ -125,16 +137,18 @@ export class Rect implements BoneAttachment {
                 config.color,
             )
             .setInteractive()
+            .setData("rect", this)
             .on("pointerdown", (p: Phaser.Input.Pointer) => {
-                this.drag = {
-                    type: "move",
-                    offX: this.rect.x - p.worldX,
-                    offY: this.rect.y - p.worldY,
-                    startX: p.worldX,
-                    startY: p.worldY,
-                    moved: false,
-                };
+                // Alt+click: pick what is UNDER the top image (click again to go deeper)
+                const alt = (p.event as MouseEvent | undefined)?.altKey;
+                const target = alt ? this.nextUnder(p) : this;
+                if (target !== this) {
+                    Rect.forced = target;
+                    this.deselect();
+                }
+                target.startMove(p);
             });
+        Rect.instances.add(this);
 
         this.pivotIndicator = this.scene.add
             .circle(0, 0, 4, 0xfff000)
@@ -160,7 +174,7 @@ export class Rect implements BoneAttachment {
                 _p: Phaser.Input.Pointer,
                 over: Phaser.GameObjects.GameObject[],
             ) => {
-                if (this.mode === null) return;
+                if (this.mode === null || Rect.forced === this) return;
                 const mine: Phaser.GameObjects.GameObject[] = [
                     this.rect,
                     this.pivotIndicator,
@@ -172,9 +186,36 @@ export class Rect implements BoneAttachment {
         );
     }
 
+    private startMove(p: Phaser.Input.Pointer) {
+        this.drag = {
+            type: "move",
+            offX: this.rect.x - p.worldX,
+            offY: this.rect.y - p.worldY,
+            startX: p.worldX,
+            startY: p.worldY,
+            moved: false,
+        };
+    }
+
+    /**
+     * Every visible rect / image under the pointer, top first, and the one that comes after the selected one
+     * (the top one if none of them is selected). This is what Alt+click cycles through.
+     */
+    private nextUnder(p: Phaser.Input.Pointer): Rect {
+        const stack = this.scene.input
+            .hitTestPointer(p)
+            .map((o) => o.getData?.("rect") as Rect | undefined)
+            .filter((r): r is Rect => !!r && r.alive && !r.hidden)
+            .sort((a, b) => b.rect.depth - a.rect.depth);
+        if (stack.length < 2) return this;
+        const i = stack.findIndex((r) => r.selected);
+        return stack[(i + 1) % stack.length];
+    }
+
     private onUp() {
         const d = this.drag;
         this.drag = null;
+        Rect.forced = null;
         // a press on the rect without dragging counts as a click
         if (d && d.type === "move" && !d.moved) this.handleClicks();
     }
@@ -264,17 +305,21 @@ export class Rect implements BoneAttachment {
             obj.setPosition(p.x, p.y).setRotation(this.rect.rotation);
         };
 
-        this.scaleIndicators.forEach((o, i) => place(o, ...this.scaleDirs[i]));
-        this.rotateIndicators.forEach((o, i) =>
-            place(o, ...this.rotateDirs[i]),
-        );
+        this.scaleIndicators.forEach((o, i) => {
+            place(o, ...this.scaleDirs[i]);
+            o.setScale(Rect.ui);
+        });
+        this.rotateIndicators.forEach((o, i) => {
+            place(o, ...this.rotateDirs[i]);
+            o.setScale(Rect.ui);
+        });
 
         const pw = this.localToWorld(
             this.pivotNorm.x * w,
             this.pivotNorm.y * h,
         );
         this.pivot.copy(pw);
-        this.pivotIndicator.setPosition(pw.x, pw.y);
+        this.pivotIndicator.setPosition(pw.x, pw.y).setScale(Rect.ui);
         this.onChange?.(this);
     }
 
@@ -627,4 +672,3 @@ export class Rect implements BoneAttachment {
         this.pivotIndicator.setVisible(true);
     }
 }
-

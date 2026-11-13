@@ -79,6 +79,24 @@ export class Bone {
     /** current mode for every bone; switch it through the store's setMode so objects get prepared too */
     static mode: BoneMode = "setup";
 
+    /** every bone ever created in this scene (dead ones are skipped by `alive`) */
+    static all = new Set<Bone>();
+    /** world units per screen pixel (1 / camera zoom): handles keep the same size on screen when you zoom */
+    static ui = 1;
+    /**
+     * Ghost mode: bones and IK handles are drawn faint and can't be clicked, so they never get in the way
+     * of picking / moving the images underneath. Toggle with the B key (or the toolbar).
+     */
+    static ghost = false;
+
+    /** change zoom compensation and/or ghost mode and restyle everything */
+    static setView(opts: { zoom?: number; ghost?: boolean }) {
+        if (opts.zoom !== undefined) Bone.ui = 1 / Math.max(0.05, opts.zoom);
+        if (opts.ghost !== undefined) Bone.ghost = opts.ghost;
+        for (const b of Bone.all) if (b.alive) b.applyView();
+        IKConstraint.restyleAll();
+    }
+
     /** never changes (used as React key / drag identity), unlike `name` */
     readonly id = `bone-${++Bone.count}`;
     /** shown in the layers list and the inspector; rename with setName */
@@ -204,6 +222,8 @@ export class Bone {
         });
 
         Bone.initScene(scene);
+        Bone.all.add(this);
+        this.applyView(false);
         this.layout();
         if (!parent) Bone.setSelection([this]);
         Bone.onCreate?.(this);
@@ -718,6 +738,19 @@ export class Bone {
         for (const c of this.children) c.layoutTree();
     }
 
+    /** zoom compensation + ghost mode for this bone's handles */
+    applyView(redraw = true) {
+        const g = Bone.ghost;
+        const u = Bone.ui;
+        this.pivot.setScale(u).setAlpha(g ? 0.35 : 1);
+        this.poll.setScale(u).setAlpha(g ? 0.35 : 1);
+        this.graphics.setAlpha(g ? 0.25 : 1);
+        // a disabled interactive object is skipped by Phaser's picking, so clicks fall through to what's below
+        for (const o of [this.body, this.pivot, this.poll])
+            if (o.input) o.input.enabled = !g;
+        if (redraw) this.drawBone();
+    }
+
     /** Show handles only while selected. */
     refresh() {
         const s = this.isSelected && !this.hidden && this.alive;
@@ -736,14 +769,14 @@ export class Bone {
 
         // relationship line for children that are not glued to the parent's tip
         if (this.parent && !this.connected) {
-            this.graphics.lineStyle(1, 0x888888);
+            this.graphics.lineStyle(1 * Bone.ui, 0x888888);
             this.graphics.beginPath();
             this.graphics.moveTo(this.pivot.x, this.pivot.y);
             this.graphics.lineTo(this.parent.pivot.x, this.parent.pivot.y);
             this.graphics.strokePath();
         }
 
-        this.graphics.lineStyle(5, color);
+        this.graphics.lineStyle(5 * Bone.ui, color);
         this.graphics.beginPath();
         this.graphics.moveTo(this.pivot.x, this.pivot.y);
         this.graphics.lineTo(this.poll.x, this.poll.y);
@@ -756,6 +789,6 @@ export class Bone {
                 (this.pivot.y + this.poll.y) / 2,
             )
             .setRotation(this.angle)
-            .setScale(this.length / 100, 1);
+            .setScale(this.length / 100, Bone.ui);
     }
 }

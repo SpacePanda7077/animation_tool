@@ -821,6 +821,16 @@ class Animation {
         else useAnimationStore.setState({ selected: [...cur, id] });
     }
 
+    /** select every key (of every bone) that sits on `frame`; additive adds to the current selection */
+    selectFrame(frame: number, additive = false) {
+        const { tracks } = useAnimationStore.getState();
+        const ids: string[] = [];
+        for (const bid of Object.keys(tracks))
+            if (tracks[bid].some((k) => k.frame === frame))
+                ids.push(keyId(bid, frame));
+        this.selectKeys(ids, additive);
+    }
+
     clearSelection() {
         if (useAnimationStore.getState().selected.length)
             useAnimationStore.setState({ selected: [] });
@@ -887,3 +897,4 @@ class Animation {
 }
 
 export const animation = new Animation();
+

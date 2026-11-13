@@ -408,6 +408,13 @@ export class IKConstraint {
             0xffffff,
         );
 
+        const ghost = Bone.ghost;
+        for (const h of [this.targetHandle, this.poleHandle]) {
+            h.setScale(Bone.ui).setAlpha(ghost ? 0.3 : 1);
+            if (h.input) h.input.enabled = !ghost;
+        }
+        this.line.setAlpha(ghost ? 0.3 : 1);
+
         const visible = Bone.mode === "pose" && this.enabled;
         this.targetHandle.setVisible(visible);
         this.poleHandle.setVisible(visible);
@@ -496,6 +503,11 @@ export class IKConstraint {
             if (Bone.mode === "pose") c.anchor();
             c.draw();
         }
+    }
+
+    /** redraw only (zoom / ghost changed); never moves anything */
+    static restyleAll() {
+        for (const c of IKConstraint.all) c.draw();
     }
 
     /** Re-solve every IK after hierarchy / body movement. */

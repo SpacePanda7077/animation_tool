@@ -487,6 +487,14 @@ export default function Timeline() {
                                     onPointerUp={() => {
                                         scrubbing.current = false;
                                     }}
+                                    // double-click a time: select every key on that frame
+                                    onDoubleClick={(e) => {
+                                        if (!posing) return;
+                                        animation.selectFrame(
+                                            frameAt(e.clientX, e.currentTarget),
+                                            e.shiftKey,
+                                        );
+                                    }}
                                 >
                                     {labels.map((f) => (
                                         <span
@@ -665,6 +673,11 @@ export default function Timeline() {
                                                             animation.stop();
                                                             animation.setFrame(
                                                                 k.frame,
+                                                            );
+                                                            // ...and pick every key on this frame
+                                                            animation.selectFrame(
+                                                                k.frame,
+                                                                e.shiftKey,
                                                             );
                                                         }}
                                                     />

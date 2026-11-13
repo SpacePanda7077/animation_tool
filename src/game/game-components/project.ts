@@ -197,12 +197,16 @@ export async function applyProject(
         builder.registry.clear();
         Bone.selection.clear();
         Bone.active = null;
+        // Bone.mode is a static the store doesn't own: if the editor was in pose
+        // mode when loading, it stayed "pose" and every new bone/rect was laid
+        // out from the wrong pose (the "scattered rig"). Reset it explicitly,
+        // together with the store, so both agree before anything is created.
+        Bone.mode = "setup";
         useObjectsStore.setState({
             objects: [],
             selected: null,
             mode: "setup",
         });
-        useObjectsStore.getState().setMode("setup");
 
         for (const p of doc.parts) {
             if (p.kind === "sprite") {
