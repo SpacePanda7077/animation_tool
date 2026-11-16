@@ -7,6 +7,11 @@ import { useObjectsStore, type Obj } from "../../store/object-store";
 import { animation, type AnimSnapshot } from "./animation";
 import { IKConstraint, addIKFromSelection, type IKState } from "./ik";
 import { history } from "./history";
+import {
+    isDesktop,
+    desktopSaveText,
+    desktopOpenText,
+} from "../../platform/desktop";
 
 /**
  * Full project document — bones, parts, animations, IK, embedded sprite images.
@@ -41,6 +46,8 @@ let sceneRef: Scene | null = null;
 
 /** Remembered file handle so Save overwrites the same file next time. */
 let fileHandle: FileSystemFileHandle | null = null;
+/** desktop app: path of the project file on disk, so Save overwrites it */
+let filePath: string | null = null;
 
 // ---------- build ----------
 
@@ -396,11 +403,13 @@ export function initProjectPersistence(scene: Scene, builder: ObjectBuilder) {
     sceneRef = scene;
     builderRef = builder;
     fileHandle = null;
+    filePath = null;
 
     scene.events.once("shutdown", () => {
         sceneRef = null;
         builderRef = null;
         fileHandle = null;
+        filePath = null;
     });
 }
 
@@ -419,6 +428,24 @@ export async function uiSaveProject(): Promise<string> {
 
     const doc = buildProject(sceneRef, builderRef);
     const json = JSON.stringify(doc, null, 2);
+
+    if (isDesktop()) {
+        try {
+            const saved = await desktopSaveText(
+                json,
+                "project.json",
+                filePath,
+            );
+            if (!saved) return "Cancelled";
+            filePath = saved.path;
+            return `Saved ${saved.name}`;
+        } catch (e) {
+            // the file may have been moved or deleted: ask again next time
+            filePath = null;
+            console.error("[project] save failed", e);
+            return "Save failed";
+        }
+    }
 
     if (!supportsFilePicker()) {
         // Fallback for browsers without the File System Access API
@@ -465,6 +492,7 @@ export async function uiSaveProject(): Promise<string> {
 /** Force a new "Save As" dialog (forget the previous file). */
 export async function uiSaveProjectAs(): Promise<string> {
     fileHandle = null;
+    filePath = null;
     return uiSaveProject();
 }
 
@@ -484,7 +512,17 @@ export async function uiLoadProject(): Promise<{
     try {
         let doc: ProjectDocument;
 
-        if ("showOpenFilePicker" in window) {
+        if (isDesktop()) {
+            const opened = await desktopOpenText();
+            if (!opened) {
+                return { ok: false, message: "Cancelled", warnings: [] };
+            }
+            doc = JSON.parse(opened.text) as ProjectDocument;
+            // Remember so Save overwrites this file (only once we know it is a project)
+            if (doc.format === "animation_tool_project") {
+                filePath = opened.path;
+            }
+        } else if ("showOpenFilePicker" in window) {
             const [handle] = await window.showOpenFilePicker({
                 types: [
                     {
@@ -552,6 +590,7 @@ export async function uiLoadProjectFile(file: File): Promise<{
         }
         // Can't get a FileSystemFileHandle from <input>, so next Save will ask again
         fileHandle = null;
+        filePath = null;
         const result = await applyProject(sceneRef, builderRef, doc);
         return {
             ok: result.ok,
