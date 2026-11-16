@@ -3,6 +3,7 @@ import { Rect } from "../game/game-components/objects/objetcs/Rect";
 import { Sprite } from "../game/game-components/objects/objetcs/Sprite";
 import { IKConstraint } from "../game/game-components/ik";
 import { useObjectsStore } from "../store/object-store";
+import { isDesktop, desktopSaveText } from "../platform/desktop";
 import {
     sample,
     useAnimationStore,
@@ -340,8 +341,19 @@ export function buildExport(options: ExportOptions): ExportResult {
 export const fileNameFor = (name: string) =>
     `${name.trim().replace(/[^\w\- ]+/g, "_") || "animation"}.json`;
 
-/** save text as a file through the browser */
-export function downloadText(text: string, fileName: string) {
+/**
+ * Save text as a file. In the desktop app this opens a native "Save As" dialog; in a browser it
+ * downloads the file.
+ */
+export async function downloadText(text: string, fileName: string) {
+    if (isDesktop()) {
+        try {
+            await desktopSaveText(text, fileName);
+        } catch (e) {
+            console.error("[export] could not save the file", e);
+        }
+        return;
+    }
     const url = URL.createObjectURL(
         new Blob([text], { type: "application/json" }),
     );
