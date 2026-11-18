@@ -1,0 +1,88 @@
+From 8f6ae9684b989aced3b092e7a29d1a25d0e16a43 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 14:40:19 +0100
+Subject: [PATCH] Let Remove lower a lone bone's weight instead of snapping
+ back to 1
+
+paintWeight returned weight 1 whenever the vertex had no other bone, so
+removing weight from a single-bone vertex did nothing (still red). Keep
+the partial value; the leftover share now follows the rigid rectangle in
+both the editor (Mesh.writeVertices) and the exported runtime.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012RE9UcXtnR9ArMu7xVtj7r
+---
+ src/export/runtime.ts                             | 15 +++++++++++++++
+ src/game/game-components/objects/objetcs/Mesh.ts  | 12 +++++++++++-
+ .../game-components/objects/objetcs/mesh-math.ts  |  6 +++++-
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/src/export/runtime.ts b/src/export/runtime.ts
+index fb4b88a..3026b9f 100644
+--- a/src/export/runtime.ts
++++ b/src/export/runtime.ts
+@@ -261,6 +261,21 @@ export function solve(
+                     v: v.v,
+                 };
+             }
++            // weights may add up to less than 1: the leftover share stays rigid under the mesh transform
++            let declared = 0;
++            for (const w of v.weights) declared += w.weight;
++            const rest = Math.max(0, 1 - declared);
++            if (rest > 1e-6) {
++                const rx = mx + v.x * mcos - v.y * msin;
++                const ry = my + v.x * msin + v.y * mcos;
++                const den = totalW + rest;
++                return {
++                    x: (sx + rx * rest) / den,
++                    y: (sy + ry * rest) / den,
++                    u: v.u,
++                    v: v.v,
++                };
++            }
+             return {
+                 x: sx / totalW,
+                 y: sy / totalW,
+diff --git a/src/game/game-components/objects/objetcs/Mesh.ts b/src/game/game-components/objects/objetcs/Mesh.ts
+index e4ad419..f386ffe 100644
+--- a/src/game/game-components/objects/objetcs/Mesh.ts
++++ b/src/game/game-components/objects/objetcs/Mesh.ts
+@@ -518,7 +518,17 @@ export class Mesh extends Rect {
+                     sy += (b.pivot.y + lx * f.s + ly * f.c) * w;
+                     total += w;
+                 }
+-                if (total > 1e-6) pos = { x: sx / total, y: sy / total };
++                // weights may add up to less than 1: the leftover share stays rigid under the rectangle
++                let declared = 0;
++                for (const w of v.weights) declared += w.weight;
++                const rest = Math.max(0, 1 - declared);
++                if (total > 1e-6) {
++                    const r = rest > 1e-6 ? this.rigidPoint(v) : null;
++                    const den = total + rest;
++                    pos = r
++                        ? { x: (sx + r.x * rest) / den, y: (sy + r.y * rest) / den }
++                        : { x: sx / total, y: sy / total };
++                }
+             }
+ 
+             // no weights (or no bone left to follow): rigid under the rectangle
+diff --git a/src/game/game-components/objects/objetcs/mesh-math.ts b/src/game/game-components/objects/objetcs/mesh-math.ts
+index 66ce169..61976be 100644
+--- a/src/game/game-components/objects/objetcs/mesh-math.ts
++++ b/src/game/game-components/objects/objetcs/mesh-math.ts
+@@ -339,7 +339,11 @@ export function paintWeight(ws: Weight[], boneId: string, amount: number): Weigh
+     const osum = others.reduce((s, w) => s + w.weight, 0);
+ 
+     if (next <= 1e-4) return normalizeWeights(others);
+-    if (osum < 1e-9) return [{ boneId, weight: 1 }];
++    if (osum < 1e-9) {
++        // no other bone: a fresh vertex goes straight to full weight, but a vertex that already has this bone
++        // keeps the partial value so Remove can lower it step by step (the rest follows the rectangle, rigid)
++        return cur > 0 ? [{ boneId, weight: next }] : [{ boneId, weight: 1 }];
++    }
+     const scale = (1 - next) / osum;
+     return normalizeWeights([
+         { boneId, weight: next },
+-- 
+2.43.0
+

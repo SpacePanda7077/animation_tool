@@ -261,6 +261,21 @@ export function solve(
                     v: v.v,
                 };
             }
+            // weights may add up to less than 1: the leftover share stays rigid under the mesh transform
+            let declared = 0;
+            for (const w of v.weights) declared += w.weight;
+            const rest = Math.max(0, 1 - declared);
+            if (rest > 1e-6) {
+                const rx = mx + v.x * mcos - v.y * msin;
+                const ry = my + v.x * msin + v.y * mcos;
+                const den = totalW + rest;
+                return {
+                    x: (sx + rx * rest) / den,
+                    y: (sy + ry * rest) / den,
+                    u: v.u,
+                    v: v.v,
+                };
+            }
             return {
                 x: sx / totalW,
                 y: sy / totalW,

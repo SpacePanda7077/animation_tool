@@ -518,7 +518,17 @@ export class Mesh extends Rect {
                     sy += (b.pivot.y + lx * f.s + ly * f.c) * w;
                     total += w;
                 }
-                if (total > 1e-6) pos = { x: sx / total, y: sy / total };
+                // weights may add up to less than 1: the leftover share stays rigid under the rectangle
+                let declared = 0;
+                for (const w of v.weights) declared += w.weight;
+                const rest = Math.max(0, 1 - declared);
+                if (total > 1e-6) {
+                    const r = rest > 1e-6 ? this.rigidPoint(v) : null;
+                    const den = total + rest;
+                    pos = r
+                        ? { x: (sx + r.x * rest) / den, y: (sy + r.y * rest) / den }
+                        : { x: sx / total, y: sy / total };
+                }
             }
 
             // no weights (or no bone left to follow): rigid under the rectangle
