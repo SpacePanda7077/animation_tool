@@ -87,6 +87,7 @@ export class MeshEditor {
     private enter(mesh: Mesh) {
         this.mesh = mesh;
         BoxSelect.suspended = true;
+        Bone.selectionLocked = true; // a brush press must not clear the active bone
         this.prevGhost = Bone.ghost;
         this.setGhost(true);
         // nothing else may be picked or dragged while editing
@@ -107,6 +108,7 @@ export class MeshEditor {
         for (const r of this.disabled) if (r.rect.input) r.rect.input.enabled = true;
         this.disabled = [];
         BoxSelect.suspended = false;
+        Bone.selectionLocked = false;
         this.setGhost(this.prevGhost);
         this.mesh = null;
         this.painting = false;

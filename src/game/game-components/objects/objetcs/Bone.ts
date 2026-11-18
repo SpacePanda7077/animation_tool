@@ -40,6 +40,8 @@ export class Bone {
     static selection = new Set<Bone>();
     /** The active bone = the last one you selected. Ctrl+K parents the others to it. */
     static active: Bone | null = null;
+    /** while true, clicking empty canvas does NOT clear the bone selection (mesh editing needs the active bone to paint) */
+    static selectionLocked = false;
     private static readyScenes = new WeakSet<Scene>();
 
     /** a press on a bone's body: it may turn into a drag that moves every selected bone */
@@ -334,6 +336,7 @@ export class Bone {
         scene.input.on(
             "pointerdown",
             (p: Input.Pointer, over: GameObjects.GameObject[]) => {
+                if (Bone.selectionLocked) return;
                 if ((p.event as MouseEvent).shiftKey) return;
                 if (!over.some((o) => o.getData("bone"))) Bone.setSelection([]);
             },

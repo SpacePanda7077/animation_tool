@@ -1,0 +1,41 @@
+diff --git a/src/game/game-components/mesh-editor.ts b/src/game/game-components/mesh-editor.ts
+index 9ce3054..345383d 100644
+--- a/src/game/game-components/mesh-editor.ts
++++ b/src/game/game-components/mesh-editor.ts
+@@ -87,6 +87,7 @@ export class MeshEditor {
+     private enter(mesh: Mesh) {
+         this.mesh = mesh;
+         BoxSelect.suspended = true;
++        Bone.selectionLocked = true; // a brush press must not clear the active bone
+         this.prevGhost = Bone.ghost;
+         this.setGhost(true);
+         // nothing else may be picked or dragged while editing
+@@ -107,6 +108,7 @@ export class MeshEditor {
+         for (const r of this.disabled) if (r.rect.input) r.rect.input.enabled = true;
+         this.disabled = [];
+         BoxSelect.suspended = false;
++        Bone.selectionLocked = false;
+         this.setGhost(this.prevGhost);
+         this.mesh = null;
+         this.painting = false;
+diff --git a/src/game/game-components/objects/objetcs/Bone.ts b/src/game/game-components/objects/objetcs/Bone.ts
+index c667481..c8480b4 100644
+--- a/src/game/game-components/objects/objetcs/Bone.ts
++++ b/src/game/game-components/objects/objetcs/Bone.ts
+@@ -40,6 +40,8 @@ export class Bone {
+     static selection = new Set<Bone>();
+     /** The active bone = the last one you selected. Ctrl+K parents the others to it. */
+     static active: Bone | null = null;
++    /** while true, clicking empty canvas does NOT clear the bone selection (mesh editing needs the active bone to paint) */
++    static selectionLocked = false;
+     private static readyScenes = new WeakSet<Scene>();
+ 
+     /** a press on a bone's body: it may turn into a drag that moves every selected bone */
+@@ -334,6 +336,7 @@ export class Bone {
+         scene.input.on(
+             "pointerdown",
+             (p: Input.Pointer, over: GameObjects.GameObject[]) => {
++                if (Bone.selectionLocked) return;
+                 if ((p.event as MouseEvent).shiftKey) return;
+                 if (!over.some((o) => o.getData("bone"))) Bone.setSelection([]);
+             },
