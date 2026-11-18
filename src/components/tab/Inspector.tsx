@@ -106,7 +106,9 @@ function MeshEditPanel() {
                             onChange={(e) => setBrush(Number(e.target.value))}
                             className="flex-1"
                         />
-                        <span className="w-8 text-right text-white">{brush}</span>
+                        <span className="w-8 text-right text-white">
+                            {brush}
+                        </span>
                     </label>
                     <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
                         <span className="w-14">Strength</span>
@@ -135,7 +137,9 @@ function MeshEditPanel() {
                         <button
                             className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
                             onClick={() => {
-                                const bones = [...Bone.all].filter((b) => b.alive);
+                                const bones = [...Bone.all].filter(
+                                    (b) => b.alive,
+                                );
                                 if (bones.length) target.autoWeight(bones, 2);
                             }}
                         >
@@ -144,8 +148,8 @@ function MeshEditPanel() {
                     </div>
                     <div className="text-[11px] text-[#878080]">
                         Drag on the canvas to paint. Hold Alt for the opposite
-                        of the chosen mode. Blue = none of this bone, red =
-                        all of it, grey = no weights yet (rigid).
+                        of the chosen mode. Blue = none of this bone, red = all
+                        of it, grey = no weights yet (rigid).
                     </div>
                 </>
             ) : (
@@ -170,7 +174,9 @@ function MeshEditPanel() {
                     <div className="text-[11px] text-[#878080]">
                         Place vertices only where you need them (like Spine).
                         Click empty space to add, drag to move, Shift+click to
-                        delete. The four orange corners stay put.
+                        delete. Ctrl+drag between vertices to force an edge
+                        (orange). Shift+click an edge to remove it. The four
+                        corner dots stay put.
                     </div>
                 </>
             )}
@@ -655,7 +661,9 @@ function Properties() {
                             disabled={posing}
                             className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
                             onClick={() =>
-                                useMeshEditStore.getState().begin(mesh, "vertices")
+                                useMeshEditStore
+                                    .getState()
+                                    .begin(mesh, "vertices")
                             }
                         >
                             Edit vertices
@@ -664,7 +672,9 @@ function Properties() {
                             disabled={posing}
                             className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
                             onClick={() =>
-                                useMeshEditStore.getState().begin(mesh, "weights")
+                                useMeshEditStore
+                                    .getState()
+                                    .begin(mesh, "weights")
                             }
                         >
                             Paint weights
@@ -715,16 +725,14 @@ function Properties() {
                                     label="Rows"
                                     value={mesh.rows}
                                     disabled={posing}
-                                    onCommit={(v) =>
-                                        mesh.setGrid(mesh.cols, v)
-                                    }
+                                    onCommit={(v) => mesh.setGrid(mesh.cols, v)}
                                 />
                             </div>
                             <div>
-                                New meshes start with only the four corners.
-                                Use <b>Edit vertices</b> and click to place
-                                points where you need them (like Spine). A
-                                uniform grid is optional and clears weights.
+                                New meshes start with only the four corners. Use{" "}
+                                <b>Edit vertices</b> and click to place points
+                                where you need them (like Spine). A uniform grid
+                                is optional and clears weights.
                             </div>
                         </div>
                     </details>
@@ -956,4 +964,3 @@ function NumberField({
         </label>
     );
 }
-

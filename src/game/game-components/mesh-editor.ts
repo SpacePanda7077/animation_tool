@@ -12,14 +12,29 @@ function heat(t: number): number {
     const seg = Math.floor(h);
     const f = h - seg;
     const [r, g, b] =
-        seg === 0 ? [1, f, 0] : seg === 1 ? [1 - f, 1, 0] : seg === 2 ? [0, 1, f] : [0, 1 - f, 1];
-    return (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
+        seg === 0
+            ? [1, f, 0]
+            : seg === 1
+              ? [1 - f, 1, 0]
+              : seg === 2
+                ? [0, 1, f]
+                : [0, 1 - f, 1];
+    return (
+        (Math.round(r * 255) << 16) |
+        (Math.round(g * 255) << 8) |
+        Math.round(b * 255)
+    );
 }
 
 /**
  * Edits a mesh on the canvas (see mesh-edit-store for what is being edited):
  *
- *  vertices tool: drag a vertex to move it, click an empty spot to add one, Shift + click a vertex to delete it.
+ *  vertices tool:
+ *    - drag a vertex to move it
+ *    - click an empty spot to add one
+ *    - Shift + click a vertex to delete it
+ *    - Ctrl + drag from one vertex to another to create a forced edge (orange)
+ *    - Shift + click near an edge to delete it
  *  weights tool:  paint with the brush. It paints the active bone (pick it in the layers list). Alt flips
  *                 add / remove while you hold it.
  *
@@ -34,6 +49,8 @@ export class MeshEditor {
     private painting = false;
     private dragging = -1;
     private moved = false;
+    /** Ctrl+drag: vertex we started from when drawing a forced edge */
+    private linking = -1;
     private pointer: { x: number; y: number } | null = null;
     private prevGhost = false;
     private disabled: Rect[] = [];
@@ -105,7 +122,8 @@ export class MeshEditor {
 
     private exit() {
         if (!this.mesh) return;
-        for (const r of this.disabled) if (r.rect.input) r.rect.input.enabled = true;
+        for (const r of this.disabled)
+            if (r.rect.input) r.rect.input.enabled = true;
         this.disabled = [];
         BoxSelect.suspended = false;
         Bone.selectionLocked = false;
@@ -113,6 +131,7 @@ export class MeshEditor {
         this.mesh = null;
         this.painting = false;
         this.dragging = -1;
+        this.linking = -1;
         this.gfx.clear();
     }
 
@@ -129,6 +148,7 @@ export class MeshEditor {
         const mesh = this.mesh;
         if (!mesh || ((p.event as MouseEvent).button ?? 0) !== 0) return;
         this.pointer = { x: p.worldX, y: p.worldY };
+        const ev = p.event as MouseEvent;
 
         if (this.tool === "weights") {
             this.painting = true;
@@ -138,14 +158,29 @@ export class MeshEditor {
 
         const hit = mesh.vertexAt(p.worldX, p.worldY, 10 * Rect.ui);
         if (hit >= 0) {
-            if ((p.event as MouseEvent).shiftKey) mesh.removeVertex(hit);
-            else {
+            if (ev.shiftKey) {
+                mesh.removeVertex(hit);
+            } else if (ev.ctrlKey || ev.metaKey) {
+                // start drawing a forced edge from this vertex
+                this.linking = hit;
+            } else {
                 this.dragging = hit;
                 this.moved = false;
             }
             return;
         }
-        // an empty spot: new vertex, and you can keep dragging it
+
+        // Shift + click near an edge deletes it
+        if (ev.shiftKey) {
+            const ei = mesh.edgeAt(p.worldX, p.worldY, 8 * Rect.ui);
+            if (ei >= 0) {
+                const [a, b] = mesh.edges[ei];
+                mesh.removeEdge(a, b);
+            }
+            return;
+        }
+
+        // empty spot: new vertex, and you can keep dragging it
         const added = mesh.addVertexAt(p.worldX, p.worldY);
         if (added >= 0) {
             this.dragging = added;
@@ -162,6 +197,10 @@ export class MeshEditor {
             this.onUp();
             return;
         }
+        if (this.linking >= 0) {
+            // only update the ghost line (drawn in draw())
+            return;
+        }
         if (this.dragging >= 0) {
             mesh.moveVertex(this.dragging, p.worldX, p.worldY);
             this.moved = true;
@@ -169,8 +208,21 @@ export class MeshEditor {
     }
 
     private onUp() {
-        if (this.dragging >= 0 && this.moved) this.mesh?.retriangulate();
+        const mesh = this.mesh;
+        if (this.linking >= 0 && mesh && this.pointer) {
+            const target = mesh.vertexAt(
+                this.pointer.x,
+                this.pointer.y,
+                12 * Rect.ui,
+            );
+            if (target >= 0 && target !== this.linking) {
+                mesh.addEdge(this.linking, target);
+            }
+        } else if (this.dragging >= 0 && this.moved) {
+            mesh?.retriangulate();
+        }
         this.dragging = -1;
+        this.linking = -1;
         this.moved = false;
         this.painting = false;
     }
@@ -181,8 +233,21 @@ export class MeshEditor {
         if (!mesh || !bone || !bone.alive) return;
         const { brush, strength, paint } = useMeshEditStore.getState();
         const alt = (p.event as MouseEvent).altKey;
-        const mode = alt ? (paint === "add" ? "remove" : paint === "remove" ? "add" : paint) : paint;
-        mesh.paintAt(p.worldX, p.worldY, brush * Rect.ui, bone.id, mode, strength);
+        const mode = alt
+            ? paint === "add"
+                ? "remove"
+                : paint === "remove"
+                  ? "add"
+                  : paint
+            : paint;
+        mesh.paintAt(
+            p.worldX,
+            p.worldY,
+            brush * Rect.ui,
+            bone.id,
+            mode,
+            strength,
+        );
     }
 
     // ------------------------------------------------------------------ overlay
@@ -195,8 +260,8 @@ export class MeshEditor {
         const ui = Rect.ui;
         const pts = mesh.vertices.map((v) => mesh.rigidPoint(v));
 
-        // triangles
-        g.lineStyle(1 * ui, 0xffffff, 0.4);
+        // triangles (faint white)
+        g.lineStyle(1 * ui, 0xffffff, 0.35);
         for (let t = 0; t < mesh.indices.length; t += 3) {
             const a = pts[mesh.indices[t]];
             const b = pts[mesh.indices[t + 1]];
@@ -206,6 +271,28 @@ export class MeshEditor {
             g.lineTo(b.x, b.y);
             g.lineTo(c.x, c.y);
             g.closePath();
+            g.strokePath();
+        }
+
+        // forced edges (Spine-style orange)
+        g.lineStyle(2 * ui, 0xff9800, 1);
+        for (const [a, b] of mesh.edges) {
+            const A = pts[a];
+            const B = pts[b];
+            if (!A || !B) continue;
+            g.beginPath();
+            g.moveTo(A.x, A.y);
+            g.lineTo(B.x, B.y);
+            g.strokePath();
+        }
+
+        // ghost edge while Ctrl+dragging
+        if (this.linking >= 0 && this.pointer && pts[this.linking]) {
+            const A = pts[this.linking];
+            g.lineStyle(2 * ui, 0xff9800, 0.6);
+            g.beginPath();
+            g.moveTo(A.x, A.y);
+            g.lineTo(this.pointer.x, this.pointer.y);
             g.strokePath();
         }
 
@@ -219,18 +306,42 @@ export class MeshEditor {
             let color: number;
             if (this.tool === "weights") {
                 const v = mesh.vertices[i];
-                color = !bone || v.weights.length === 0 ? 0x555555 : heat(mesh.weightOf(i, bone.id));
-            } else color = mesh.isCornerVertex(i) ? 0xffb300 : i === hover ? 0xffffff : 0x4fc3f7;
+                color =
+                    !bone || v.weights.length === 0
+                        ? 0x555555
+                        : heat(mesh.weightOf(i, bone.id));
+            } else
+                color =
+                    i === this.linking
+                        ? 0xff9800
+                        : mesh.isCornerVertex(i)
+                          ? 0xffb300
+                          : i === hover
+                            ? 0xffffff
+                            : 0x4fc3f7;
             g.fillStyle(color, 1);
-            g.fillCircle(p.x, p.y, (i === hover ? 6 : 4.5) * ui);
+            g.fillCircle(
+                p.x,
+                p.y,
+                (i === hover || i === this.linking ? 6 : 4.5) * ui,
+            );
             g.lineStyle(1 * ui, 0x000000, 0.8);
-            g.strokeCircle(p.x, p.y, (i === hover ? 6 : 4.5) * ui);
+            g.strokeCircle(
+                p.x,
+                p.y,
+                (i === hover || i === this.linking ? 6 : 4.5) * ui,
+            );
         });
 
         // brush
         if (this.tool === "weights" && this.pointer) {
             g.lineStyle(1.5 * ui, 0xffd54f, 1);
-            g.strokeCircle(this.pointer.x, this.pointer.y, useMeshEditStore.getState().brush * ui);
+            g.strokeCircle(
+                this.pointer.x,
+                this.pointer.y,
+                useMeshEditStore.getState().brush * ui,
+            );
         }
     }
 }
+

@@ -6,7 +6,8 @@ import {
     MAX_GRID,
     autoWeights,
     barycentric,
-    delaunay,
+    constrainedDelaunay,
+    edgeKey,
     isCorner,
     keepOpaqueTriangles,
     makeGrid,
@@ -43,6 +44,8 @@ export type MeshState = RectState & {
     vertices: MeshVertex[];
     /** triangle corners (flat list of vertex indices, 3 per triangle) */
     indices: number[];
+    /** forced edges [a, b] vertex indices (Spine-style); triangulation will not cross them */
+    edges: [number, number][];
 };
 
 export type mesh_config = sprite_config & {
@@ -78,7 +81,8 @@ export class Mesh extends Rect {
     /** call once per frame: re-skin every bound mesh (the bones may have moved, rotated, been animated, IK-solved...) */
     static updateAll() {
         if (Bone.mode !== "pose") return;
-        for (const m of Mesh.all) if (m.alive && !m.hidden && m.bound) m.writeVertices(true);
+        for (const m of Mesh.all)
+            if (m.alive && !m.hidden && m.bound) m.writeVertices(true);
     }
 
     /** the Phaser object that draws the triangles; it stays at (0, 0), its vertices are written in world space */
@@ -92,6 +96,8 @@ export class Mesh extends Rect {
     vertices: MeshVertex[] = [];
     /** triangle corners, 3 vertex indices per triangle (the export uses this list as it is) */
     indices: number[] = [];
+    /** forced edges (Spine-style orange lines); triangulation will not cross them */
+    edges: [number, number][] = [];
 
     /** pose mode: per vertex, per weight, the bone and the vertex in that bone's frame at bind time */
     private bound = false;
@@ -133,10 +139,11 @@ export class Mesh extends Rect {
     // Geometry
     // ------------------------------------------------------------------
 
-    /** a fresh regular grid over the picture. This clears every weight. */
+    /** a fresh regular grid over the picture. This clears every weight and every forced edge. */
     buildGrid() {
         const { verts, tris } = makeGrid(this.cols, this.rows);
         this.vertices = verts.map((v) => ({ ...v, weights: [] }));
+        this.edges = [];
         this.indices = this.trimmed(tris);
         this.neighbors = null;
         this.bound = false;
@@ -210,12 +217,20 @@ export class Mesh extends Rect {
                 const canvas = document.createElement("canvas");
                 canvas.width = w;
                 canvas.height = h;
-                const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+                const ctx = canvas.getContext("2d", {
+                    willReadFrequently: true,
+                })!;
                 ctx.drawImage(img, 0, 0);
                 const data = ctx.getImageData(0, 0, w, h).data;
                 this.opaque = (x, y) => {
-                    const px = Math.max(0, Math.min(w - 1, Math.floor((x + 0.5) * w)));
-                    const py = Math.max(0, Math.min(h - 1, Math.floor((y + 0.5) * h)));
+                    const px = Math.max(
+                        0,
+                        Math.min(w - 1, Math.floor((x + 0.5) * w)),
+                    );
+                    const py = Math.max(
+                        0,
+                        Math.min(h - 1, Math.floor((y + 0.5) * h)),
+                    );
                     return data[(py * w + px) * 4 + 3] > 10;
                 };
             } catch {
@@ -246,11 +261,93 @@ export class Mesh extends Rect {
 
     /** work out the triangles again from the vertices (after adding / removing / moving them) */
     retriangulate() {
-        this.indices = this.trimmed(delaunay(this.vertices));
+        // drop edges that point at missing vertices
+        this.edges = this.edges.filter(
+            ([a, b]) =>
+                a >= 0 &&
+                b >= 0 &&
+                a < this.vertices.length &&
+                b < this.vertices.length &&
+                a !== b,
+        );
+        this.indices = this.trimmed(
+            constrainedDelaunay(this.vertices, this.edges),
+        );
         this.neighbors = null;
         this.rebuildGeometry();
         this.syncMesh();
         this.onChange?.(this);
+    }
+
+    /** true if these two vertices are already joined by a forced edge */
+    hasEdge(a: number, b: number): boolean {
+        const k = edgeKey(a, b);
+        return this.edges.some(([u, v]) => edgeKey(u, v) === k);
+    }
+
+    /**
+     * Force an edge between two vertices (Spine-style orange line).
+     * Triangles will not cross it. Returns false if the edge already exists or the indices are bad.
+     */
+    addEdge(a: number, b: number): boolean {
+        if (this.locked) return false;
+        if (
+            a === b ||
+            a < 0 ||
+            b < 0 ||
+            a >= this.vertices.length ||
+            b >= this.vertices.length
+        )
+            return false;
+        if (this.hasEdge(a, b)) return false;
+        this.edges.push(a < b ? [a, b] : [b, a]);
+        this.retriangulate();
+        return true;
+    }
+
+    /** remove a forced edge if it exists */
+    removeEdge(a: number, b: number): boolean {
+        if (this.locked) return false;
+        const k = edgeKey(a, b);
+        const before = this.edges.length;
+        this.edges = this.edges.filter(([u, v]) => edgeKey(u, v) !== k);
+        if (this.edges.length === before) return false;
+        this.retriangulate();
+        return true;
+    }
+
+    /**
+     * The closest forced edge within `radius` (world units) of a world point, or -1.
+     * Distance is measured to the segment in world space.
+     */
+    edgeAt(wx: number, wy: number, radius: number): number {
+        let best = -1;
+        let bestD = radius;
+        const pts = this.vertices.map((v) => this.rigidPoint(v));
+        this.edges.forEach(([a, b], i) => {
+            const A = pts[a];
+            const B = pts[b];
+            if (!A || !B) return;
+            const dx = B.x - A.x;
+            const dy = B.y - A.y;
+            const len2 = dx * dx + dy * dy;
+            const t =
+                len2 < 1e-9
+                    ? 0
+                    : Math.max(
+                          0,
+                          Math.min(
+                              1,
+                              ((wx - A.x) * dx + (wy - A.y) * dy) / len2,
+                          ),
+                      );
+            const d = Math.hypot(wx - (A.x + t * dx), wy - (A.y + t * dy));
+            if (d <= bestD) {
+                bestD = d;
+                best = i;
+            }
+        });
+        return best;
     }
 
     /** a world point -> unit space (the opposite of rigidPoint) */
@@ -322,7 +419,12 @@ export class Mesh extends Rect {
             const ia = this.indices[t];
             const ib = this.indices[t + 1];
             const ic = this.indices[t + 2];
-            const b = barycentric(p, this.vertices[ia], this.vertices[ib], this.vertices[ic]);
+            const b = barycentric(
+                p,
+                this.vertices[ia],
+                this.vertices[ib],
+                this.vertices[ic],
+            );
             if (b && b.every((c) => c >= -1e-9)) {
                 weights = mixWeights(
                     [ia, ib, ic].map((k) => this.vertices[k].weights),
@@ -344,16 +446,30 @@ export class Mesh extends Rect {
             weights = this.vertices[best].weights.map((w) => ({ ...w }));
         }
 
-        this.vertices.push({ x: p.x, y: p.y, u: p.x + 0.5, v: p.y + 0.5, weights });
+        this.vertices.push({
+            x: p.x,
+            y: p.y,
+            u: p.x + 0.5,
+            v: p.y + 0.5,
+            weights,
+        });
         this.retriangulate();
         return this.vertices.length - 1;
     }
 
     /** delete a vertex (the four corners stay, and so do at least four vertices) */
     removeVertex(i: number): boolean {
-        if (this.locked || this.isCornerVertex(i) || this.vertices.length <= 4) return false;
+        if (this.locked || this.isCornerVertex(i) || this.vertices.length <= 4)
+            return false;
         if (!this.vertices[i]) return false;
         this.vertices.splice(i, 1);
+        // drop edges that used this vertex; renumber the rest
+        this.edges = this.edges
+            .filter(([a, b]) => a !== i && b !== i)
+            .map(
+                ([a, b]) =>
+                    [a > i ? a - 1 : a, b > i ? b - 1 : b] as [number, number],
+            );
         this.retriangulate();
         return true;
     }
@@ -364,14 +480,24 @@ export class Mesh extends Rect {
 
     /** how much of `boneId` a vertex has (0 if it has none) */
     weightOf(i: number, boneId: string): number {
-        return this.vertices[i]?.weights.find((w) => w.boneId === boneId)?.weight ?? 0;
+        return (
+            this.vertices[i]?.weights.find((w) => w.boneId === boneId)
+                ?.weight ?? 0
+        );
     }
 
     /**
      * One dab of the brush at a world point. Vertices closer than `radius` are changed, most in the middle.
      *  add: more of the bone, remove: less of it, smooth: blend towards the neighbouring vertices.
      */
-    paintAt(wx: number, wy: number, radius: number, boneId: string, mode: PaintMode, strength: number) {
+    paintAt(
+        wx: number,
+        wy: number,
+        radius: number,
+        boneId: string,
+        mode: PaintMode,
+        strength: number,
+    ) {
         if (this.locked || Bone.mode !== "setup" || radius <= 0) return;
         if (mode === "smooth" && !this.neighbors)
             this.neighbors = neighborLists(this.vertices.length, this.indices);
@@ -383,8 +509,10 @@ export class Mesh extends Rect {
             const d = Math.hypot(p.x - wx, p.y - wy);
             if (d > radius) return;
             const amount = strength * (1 - (d / radius) ** 2);
-            if (mode === "add") next.set(i, paintWeight(v.weights, boneId, amount));
-            else if (mode === "remove") next.set(i, paintWeight(v.weights, boneId, -amount));
+            if (mode === "add")
+                next.set(i, paintWeight(v.weights, boneId, amount));
+            else if (mode === "remove")
+                next.set(i, paintWeight(v.weights, boneId, -amount));
             else
                 next.set(
                     i,
@@ -538,7 +666,10 @@ export class Mesh extends Rect {
                     const r = rest > 1e-6 ? this.rigidPoint(v) : null;
                     const den = total + rest;
                     pos = r
-                        ? { x: (sx + r.x * rest) / den, y: (sy + r.y * rest) / den }
+                        ? {
+                              x: (sx + r.x * rest) / den,
+                              y: (sy + r.y * rest) / den,
+                          }
                         : { x: sx / total, y: sy / total };
                 }
             }
@@ -628,6 +759,7 @@ export class Mesh extends Rect {
                 weights: v.weights.map((w) => ({ ...w })),
             })),
             indices: [...this.indices],
+            edges: this.edges.map(([a, b]) => [a, b]),
         };
     }
 
@@ -639,6 +771,7 @@ export class Mesh extends Rect {
             trim?: boolean;
             vertices?: MeshVertex[];
             indices?: number[];
+            edges?: [number, number][];
         },
     ) {
         super.restore(s); // this also gives the rectangle a fill again...
@@ -657,6 +790,7 @@ export class Mesh extends Rect {
                 weights: v.weights.map((w) => ({ ...w })),
             }));
             this.indices = [...s.indices];
+            this.edges = (s.edges ?? []).map(([a, b]) => [a, b]);
             this.neighbors = null;
             this.rebuildGeometry();
         }
@@ -664,3 +798,4 @@ export class Mesh extends Rect {
         this.syncMesh();
     }
 }
+

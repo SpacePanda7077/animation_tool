@@ -263,6 +263,162 @@ export function delaunay(pts: P2[]): number[] {
     return out;
 }
 
+/** ordered edge key so (a,b) and (b,a) are the same */
+export function edgeKey(a: number, b: number): string {
+    return a < b ? `${a},${b}` : `${b},${a}`;
+}
+
+/** true if segments ab and cd properly cross (share an interior point) */
+function segmentsCross(
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    cx: number,
+    cy: number,
+    dx: number,
+    dy: number,
+): boolean {
+    const orient = (
+        px: number,
+        py: number,
+        qx: number,
+        qy: number,
+        rx: number,
+        ry: number,
+    ) => (qy - py) * (rx - qx) - (qx - px) * (ry - qy);
+    const o1 = orient(ax, ay, bx, by, cx, cy);
+    const o2 = orient(ax, ay, bx, by, dx, dy);
+    const o3 = orient(cx, cy, dx, dy, ax, ay);
+    const o4 = orient(cx, cy, dx, dy, bx, by);
+    // proper intersection only (ignore shared endpoints)
+    if (Math.abs(o1) < 1e-14 || Math.abs(o2) < 1e-14) return false;
+    if (Math.abs(o3) < 1e-14 || Math.abs(o4) < 1e-14) return false;
+    return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+}
+
+/**
+ * Delaunay triangulation that also keeps the given constrained edges.
+ * Constraints that cross each other or sit outside the point set are skipped.
+ * Implementation: unconstrained Delaunay, then force each constraint in with edge flips.
+ */
+export function constrainedDelaunay(
+    pts: P2[],
+    constraints: [number, number][],
+): number[] {
+    let tris = delaunay(pts);
+    if (tris.length === 0 || constraints.length === 0) return tris;
+
+    const n = pts.length;
+    const hasEdge = (a: number, b: number, list: number[]) => {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        for (let t = 0; t < list.length; t += 3) {
+            const v = [list[t], list[t + 1], list[t + 2]];
+            for (let i = 0; i < 3; i++) {
+                const u = v[i];
+                const w = v[(i + 1) % 3];
+                if (Math.min(u, w) === lo && Math.max(u, w) === hi) return true;
+            }
+        }
+        return false;
+    };
+
+    // find the two triangles that share edge (u,v); returns [opp0, opp1] or null
+    const opposites = (
+        u: number,
+        v: number,
+        list: number[],
+    ): [number, number] | null => {
+        const found: number[] = [];
+        for (let t = 0; t < list.length; t += 3) {
+            const a = list[t];
+            const b = list[t + 1];
+            const c = list[t + 2];
+            const verts = [a, b, c];
+            if (
+                verts.includes(u) &&
+                verts.includes(v) &&
+                verts.filter((x) => x !== u && x !== v).length === 1
+            ) {
+                found.push(verts.find((x) => x !== u && x !== v)!);
+            }
+        }
+        return found.length === 2 ? [found[0], found[1]] : null;
+    };
+
+    for (const [ca, cb] of constraints) {
+        if (
+            ca === cb ||
+            ca < 0 ||
+            cb < 0 ||
+            ca >= n ||
+            cb >= n ||
+            hasEdge(ca, cb, tris)
+        )
+            continue;
+
+        // flip edges that cross the constraint until (ca,cb) is present or we give up
+        for (let guard = 0; guard < 64 && !hasEdge(ca, cb, tris); guard++) {
+            let flipped = false;
+            for (let t = 0; t < tris.length && !flipped; t += 3) {
+                const a = tris[t];
+                const b = tris[t + 1];
+                const c = tris[t + 2];
+                const edges: [number, number][] = [
+                    [a, b],
+                    [b, c],
+                    [c, a],
+                ];
+                for (const [u, v] of edges) {
+                    if (
+                        !segmentsCross(
+                            pts[ca].x,
+                            pts[ca].y,
+                            pts[cb].x,
+                            pts[cb].y,
+                            pts[u].x,
+                            pts[u].y,
+                            pts[v].x,
+                            pts[v].y,
+                        )
+                    )
+                        continue;
+                    const opp = opposites(u, v, tris);
+                    if (!opp) continue;
+                    const [p, q] = opp;
+                    // flip uv -> pq: replace the two triangles (u,v,p) and (u,v,q) with (p,q,u) and (p,q,v)
+                    const next: number[] = [];
+                    for (let i = 0; i < tris.length; i += 3) {
+                        const ta = tris[i];
+                        const tb = tris[i + 1];
+                        const tc = tris[i + 2];
+                        const set = new Set([ta, tb, tc]);
+                        const isUVP =
+                            set.has(u) &&
+                            set.has(v) &&
+                            set.has(p) &&
+                            set.size === 3;
+                        const isUVQ =
+                            set.has(u) &&
+                            set.has(v) &&
+                            set.has(q) &&
+                            set.size === 3;
+                        if (isUVP || isUVQ) continue;
+                        next.push(ta, tb, tc);
+                    }
+                    next.push(p, q, u, p, q, v);
+                    tris = next;
+                    flipped = true;
+                    break;
+                }
+            }
+            if (!flipped) break; // cannot force this constraint (e.g. crosses another constraint)
+        }
+    }
+    return tris;
+}
+
 /**
  * Drop the triangles that only cover see-through parts of the picture.
  * A triangle stays if any of a small lattice of sample points inside it is opaque (`opaque` gets unit-space x, y).
