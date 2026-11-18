@@ -12,6 +12,8 @@ export default defineConfig({
         port: 8080,
         // Tauri expects this exact port (devUrl in src-tauri/tauri.conf.json)
         strictPort: true,
+        watch: {
+            ignored: ["**/src-tauri/**"],
+        },
     },
 });
-

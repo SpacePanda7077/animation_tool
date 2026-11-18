@@ -13,8 +13,9 @@ The file always contains the **setup pose** + the keyframes, no matter which mod
 - Angles are **radians**, positions are pixels, key times are in **frames** (`time` = seconds is included too).
 - Bones are listed **parents first**. Names are made unique on export (the dialog tells you if it renamed something).
 - A key is a **pose offset** on top of the bone's setup transform, so you can re-tune the setup later without redoing the animation.
-- `parts` are the rectangles in **draw order, back to front**. A part with a `bone` is placed relative to that bone.
+- `parts` are the rectangles / sprites / meshes in **draw order, back to front**. A part with a `bone` is placed relative to that bone.
 - Interpolation per key: `linear`, `smooth` (smoothstep) or `step`. *Bake every frame* turns everything into `linear` keys on whole frames.
+- **Meshes** (`type: "mesh"`) include `vertices` (local x/y, u/v, bone weights) and `indices`. `solve()` returns skinned world-space vertices for them.
 
 ## Using it in Phaser (example)
 ```ts

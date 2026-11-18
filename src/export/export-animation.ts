@@ -1,6 +1,7 @@
 import { Bone } from "../game/game-components/objects/objetcs/Bone";
 import { Rect } from "../game/game-components/objects/objetcs/Rect";
 import { Sprite } from "../game/game-components/objects/objetcs/Sprite";
+import { Mesh } from "../game/game-components/objects/objetcs/Mesh";
 import { IKConstraint } from "../game/game-components/ik";
 import { useObjectsStore } from "../store/object-store";
 import { isDesktop, desktopSaveText } from "../platform/desktop";
@@ -16,6 +17,7 @@ import type {
     ExportIK,
     ExportKey,
     ExportPart,
+    ExportMeshVertex,
 } from "./format";
 
 export type ExportOptions = {
@@ -214,6 +216,10 @@ export function buildExport(options: ExportOptions): ExportResult {
         "parts",
         warnings,
     );
+    // bone id -> export name (for mesh weights)
+    const boneIdToName = new Map<string, string>();
+    for (const [bone, name] of boneNames) boneIdToName.set(bone.id, name);
+
     const parts: ExportPart[] = rects.map((r, i) => {
         const s = r.snapshot(); // setup placement, also while posing
         const width = r.rect.width * s.scaleX;
@@ -232,19 +238,43 @@ export function buildExport(options: ExportOptions): ExportResult {
             y = -dx * sn + dy * c;
             rotation = s.rot - w.rot;
         }
+
+        let type: ExportPart["type"] = "rect";
+        if (r instanceof Mesh) type = "mesh";
+        else if (r instanceof Sprite) type = "sprite";
+
         const part: ExportPart = {
             name: partNames[i],
-            type: r instanceof Sprite ? "sprite" : "rect",
+            type,
             bone: b ? boneNames.get(b)! : null,
             x,
             y,
             rotation,
             width,
             height,
-            color: r instanceof Sprite ? "#ffffff" : hex(s.color),
+            color: type === "rect" ? hex(s.color) : "#ffffff",
             visible: !r.hidden,
         };
-        if (r instanceof Sprite) part.image = r.textureKey;
+        if (r instanceof Sprite || r instanceof Mesh) {
+            part.image = r.textureKey;
+        }
+        if (r instanceof Mesh) {
+            const verts: ExportMeshVertex[] = r.vertices.map((v) => ({
+                x: v.x,
+                y: v.y,
+                u: v.u,
+                v: v.v,
+                weights: v.weights
+                    .map((w) => {
+                        const boneName = boneIdToName.get(w.boneId);
+                        if (!boneName) return null;
+                        return { bone: boneName, weight: w.weight };
+                    })
+                    .filter((w): w is { bone: string; weight: number } => !!w),
+            }));
+            part.vertices = verts;
+            part.indices = [...r.indices];
+        }
         return part;
     });
 
@@ -253,7 +283,12 @@ export function buildExport(options: ExportOptions): ExportResult {
     ];
     if (images.length)
         warnings.push(
-            `Sprites refer to their images by file name (${images.join(", ")}); load them in your game under the same names.`,
+            `Sprites/meshes refer to their images by file name (${images.join(", ")}); load them in your game under the same names.`,
+        );
+    const meshCount = parts.filter((p) => p.type === "mesh").length;
+    if (meshCount)
+        warnings.push(
+            `${meshCount} skinned mesh(es) exported. Use solve() + the vertices/indices/weights to deform them at runtime.`,
         );
 
     // ---------- IK (the game drives these from code; animations don't key them) ----------

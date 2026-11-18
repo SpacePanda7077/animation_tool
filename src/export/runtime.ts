@@ -60,10 +60,18 @@ export type SolvedBone = {
     tipY: number;
 };
 
+export type SolvedVertex = {
+    /** world position after skinning */
+    x: number;
+    y: number;
+    u: number;
+    v: number;
+};
+
 export type SolvedPart = {
     name: string;
-    type: "rect" | "sprite";
-    /** sprites only: the image file name to draw */
+    type: "rect" | "sprite" | "mesh";
+    /** sprites and meshes: the image file name to draw */
     image?: string;
     x: number;
     y: number;
@@ -72,6 +80,10 @@ export type SolvedPart = {
     height: number;
     color: string;
     visible: boolean;
+    /** meshes only: skinned vertex positions in world space + UVs */
+    vertices?: SolvedVertex[];
+    /** meshes only: triangle indices (same as export) */
+    indices?: number[];
 };
 
 export type SolvedPose = {
@@ -132,14 +144,138 @@ export function solve(
             visible: p.visible,
         };
         const b = p.bone ? bones[p.bone] : null;
-        if (!b) return { ...base, x: p.x, y: p.y, rotation: p.rotation };
-        const c = Math.cos(b.rotation);
-        const s = Math.sin(b.rotation);
+
+        // mesh world center / rotation (from hierarchy parent, same as rect/sprite)
+        let mx = p.x;
+        let my = p.y;
+        let mrot = p.rotation;
+        if (b) {
+            const c = Math.cos(b.rotation);
+            const s = Math.sin(b.rotation);
+            mx = b.x + p.x * c - p.y * s;
+            my = b.y + p.x * s + p.y * c;
+            mrot = b.rotation + p.rotation;
+        }
+
+        if (p.type !== "mesh" || !p.vertices || !p.indices) {
+            return { ...base, x: mx, y: my, rotation: mrot };
+        }
+
+        // Linear Blend Skinning
+        // Bind pose = setup pose of the skeleton (keys = 0).
+        // Vertex local coords are relative to the mesh center at bind.
+        const mcos = Math.cos(mrot);
+        const msin = Math.sin(mrot);
+
+        // Build bind bone poses (setup only — keys are already applied in `bones`)
+        // For LBS we need the bind (setup) bone world transforms.
+        // We reconstruct them the same way solve does, but with zero deltas.
+        const bindBones: Record<string, SolvedBone> = {};
+        for (const eb of data.bones) {
+            const lx = eb.x;
+            const ly = eb.y;
+            const lr = eb.rotation;
+            const parent = eb.parent ? bindBones[eb.parent] : null;
+            let x = lx;
+            let y = ly;
+            let rotation = lr;
+            if (parent) {
+                const c = Math.cos(parent.rotation);
+                const s = Math.sin(parent.rotation);
+                x = parent.x + lx * c - ly * s;
+                y = parent.y + lx * s + ly * c;
+                rotation = parent.rotation + lr;
+            }
+            bindBones[eb.name] = {
+                x,
+                y,
+                rotation,
+                tipX: x + Math.cos(rotation) * eb.length,
+                tipY: y + Math.sin(rotation) * eb.length,
+            };
+        }
+
+        // Mesh bind center (setup placement)
+        let bindMx = p.x;
+        let bindMy = p.y;
+        let bindMrot = p.rotation;
+        if (p.bone && bindBones[p.bone]) {
+            const bb = bindBones[p.bone];
+            const c = Math.cos(bb.rotation);
+            const s = Math.sin(bb.rotation);
+            bindMx = bb.x + p.x * c - p.y * s;
+            bindMy = bb.y + p.x * s + p.y * c;
+            bindMrot = bb.rotation + p.rotation;
+        }
+        const bmcos = Math.cos(bindMrot);
+        const bmsin = Math.sin(bindMrot);
+
+        const skinned: SolvedVertex[] = p.vertices.map((v) => {
+            // vertex world position at bind
+            const bindWx = bindMx + v.x * bmcos - v.y * bmsin;
+            const bindWy = bindMy + v.x * bmsin + v.y * bmcos;
+
+            if (!v.weights.length) {
+                // rigid under current mesh transform
+                return {
+                    x: mx + v.x * mcos - v.y * msin,
+                    y: my + v.x * msin + v.y * mcos,
+                    u: v.u,
+                    v: v.v,
+                };
+            }
+
+            let sx = 0;
+            let sy = 0;
+            let totalW = 0;
+            for (const w of v.weights) {
+                if (w.weight <= 0) continue;
+                const cur = bones[w.bone];
+                const bind = bindBones[w.bone];
+                if (!cur || !bind) continue;
+
+                // into bind-bone local
+                const dx = bindWx - bind.x;
+                const dy = bindWy - bind.y;
+                const bca = Math.cos(-bind.rotation);
+                const bsa = Math.sin(-bind.rotation);
+                const lx = dx * bca - dy * bsa;
+                const ly = dx * bsa + dy * bca;
+
+                // out through current bone
+                const cca = Math.cos(cur.rotation);
+                const csa = Math.sin(cur.rotation);
+                const wx = cur.x + lx * cca - ly * csa;
+                const wy = cur.y + lx * csa + ly * cca;
+
+                sx += wx * w.weight;
+                sy += wy * w.weight;
+                totalW += w.weight;
+            }
+
+            if (totalW < 1e-6) {
+                return {
+                    x: mx + v.x * mcos - v.y * msin,
+                    y: my + v.x * msin + v.y * mcos,
+                    u: v.u,
+                    v: v.v,
+                };
+            }
+            return {
+                x: sx / totalW,
+                y: sy / totalW,
+                u: v.u,
+                v: v.v,
+            };
+        });
+
         return {
             ...base,
-            x: b.x + p.x * c - p.y * s,
-            y: b.y + p.x * s + p.y * c,
-            rotation: b.rotation + p.rotation,
+            x: mx,
+            y: my,
+            rotation: mrot,
+            vertices: skinned,
+            indices: p.indices,
         };
     });
 

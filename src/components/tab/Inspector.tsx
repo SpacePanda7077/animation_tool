@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { isRoot, Obj, useObjectsStore } from "../../store/object-store";
 import { Rect } from "../../game/game-components/objects/objetcs/Rect";
 import { Sprite } from "../../game/game-components/objects/objetcs/Sprite";
+import { Mesh } from "../../game/game-components/objects/objetcs/Mesh";
 import { Bone } from "../../game/game-components/objects/objetcs/Bone";
 import { IKConstraint } from "../../game/game-components/ik";
 import { EventBus } from "../../game/EventBus";
@@ -159,9 +160,11 @@ function Layers() {
                     <span className="text-[#878080]">
                         {o instanceof Bone
                             ? "🦴"
-                            : o instanceof Sprite
-                              ? "🖼"
-                              : "▭"}
+                            : o instanceof Mesh
+                              ? "🕸️"
+                              : o instanceof Sprite
+                                ? "🖼"
+                                : "▭"}
                     </span>
                     <span className="flex-1 truncate">{o.name}</span>
                     <button
@@ -457,6 +460,7 @@ function Properties() {
 
     const r = selected;
     const sprite = r instanceof Sprite ? r : null;
+    const mesh = r instanceof Mesh ? r : null;
     const hex = r.rect.fillColor.toString(16).padStart(6, "0");
     return (
         <div className="flex flex-col gap-3">
@@ -466,9 +470,42 @@ function Properties() {
                 onCommit={(v) => r.setName(v)}
             />
 
-            {sprite && (
+            {sprite && !mesh && (
                 <Group label="Image">
                     <Info label="File" value={sprite.textureKey} />
+                    <div className="text-[11px] text-[#878080]">
+                        Press <kbd className="text-white">M</kbd> to convert to
+                        a skinned mesh
+                    </div>
+                </Group>
+            )}
+
+            {mesh && (
+                <Group label="Mesh">
+                    <Info label="Texture" value={mesh.textureKey} />
+                    <Info label="Grid" value={`${mesh.cols} × ${mesh.rows}`} />
+                    <Info
+                        label="Vertices"
+                        value={String(mesh.vertices.length)}
+                    />
+                    <Info
+                        label="Weighted"
+                        value={
+                            mesh.vertices.some((v) => v.weights.length > 0)
+                                ? "yes"
+                                : "no (rigid)"
+                        }
+                    />
+                    <button
+                        disabled={posing}
+                        className="self-end text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                        onClick={() => {
+                            const bones = [...Bone.all].filter((b) => b.alive);
+                            if (bones.length) mesh.autoWeight(bones, 2);
+                        }}
+                    >
+                        Auto-weight
+                    </button>
                 </Group>
             )}
 
@@ -697,3 +734,4 @@ function NumberField({
         </label>
     );
 }
+

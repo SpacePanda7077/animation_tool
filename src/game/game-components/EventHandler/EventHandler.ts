@@ -3,6 +3,9 @@ import { EventBus } from "../../EventBus";
 import { type ObjectBuilder } from "../objects/object-builder";
 import { duplicateSelection } from "../objects/duplicate";
 import { loadImageFile } from "../objects/objetcs/sprite-texture";
+import { Sprite } from "../objects/objetcs/Sprite";
+import { Mesh } from "../objects/objetcs/Mesh";
+import { Bone } from "../objects/objetcs/Bone";
 import { useObjectsStore } from "../../../store/object-store";
 
 export class EventHandler {
@@ -16,6 +19,7 @@ export class EventHandler {
     private onAddSprite = (file: File) => void this.addSprite(file);
     private onAddBone = () => this.addBone();
     private onDuplicate = () => this.duplicate();
+    private onConvertToMesh = () => this.convertSelectedToMesh();
     private onKey = (e: KeyboardEvent) => {
         // Shift+D = duplicate
         if (
@@ -26,6 +30,17 @@ export class EventHandler {
         ) {
             e.preventDefault();
             this.duplicate();
+            return;
+        }
+        // M = convert selected Sprite → Mesh (setup mode only)
+        if (
+            !e.shiftKey &&
+            !e.ctrlKey &&
+            !e.metaKey &&
+            e.key.toLowerCase() === "m"
+        ) {
+            e.preventDefault();
+            this.convertSelectedToMesh();
         }
     };
 
@@ -34,6 +49,7 @@ export class EventHandler {
         EventBus.on("add_sprite", this.onAddSprite);
         EventBus.on("add_bone", this.onAddBone);
         EventBus.on("duplicate", this.onDuplicate);
+        EventBus.on("convert_to_mesh", this.onConvertToMesh);
         this.objectBuilder.scene.input.keyboard?.on("keydown", this.onKey);
     }
 
@@ -75,11 +91,30 @@ export class EventHandler {
         duplicateSelection(this.objectBuilder);
     }
 
+    /**
+     * Convert the currently selected Sprite into a skinned Mesh (4×4 grid).
+     * Also runs auto-weight against all bones currently in the scene.
+     */
+    convertSelectedToMesh() {
+        if (useObjectsStore.getState().mode !== "setup") return;
+        const selected = useObjectsStore.getState().selected;
+        if (!(selected instanceof Sprite)) return;
+
+        const mesh = this.objectBuilder.spriteToMesh(selected, 4, 4);
+
+        // Auto-weight against every bone
+        const bones = [...Bone.all].filter((b) => b.alive);
+        if (bones.length > 0) {
+            mesh.autoWeight(bones, 2);
+        }
+    }
+
     destroy = () => {
         EventBus.off("add_rect", this.onAddRect);
         EventBus.off("add_sprite", this.onAddSprite);
         EventBus.off("add_bone", this.onAddBone);
         EventBus.off("duplicate", this.onDuplicate);
+        EventBus.off("convert_to_mesh", this.onConvertToMesh);
         this.objectBuilder.scene.input?.keyboard?.off("keydown", this.onKey);
     };
 }

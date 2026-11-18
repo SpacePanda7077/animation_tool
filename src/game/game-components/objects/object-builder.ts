@@ -2,6 +2,7 @@ import { Scene } from "phaser";
 import { rect_config, sprite_config } from "./configuration";
 import { Rect } from "./objetcs/Rect";
 import { Sprite } from "./objetcs/Sprite";
+import { Mesh, type mesh_config } from "./objetcs/Mesh";
 import { Bone } from "./objetcs/Bone";
 import { Grid } from "../grid";
 import { useObjectsStore, type Obj } from "../../../store/object-store";
@@ -52,7 +53,50 @@ export class ObjectBuilder {
         return sprite;
     }
 
-    /** hook a new rect / sprite up to the grid, the inspector and the object list */
+    /**
+     * A skinned mesh (grid of vertices that can be weighted to multiple bones).
+     * Texture must already be loaded. Default subdivision is 4×4.
+     */
+    mesh(config: mesh_config): Mesh {
+        const mesh = new Mesh(this.scene, config);
+        this.register(mesh);
+        return mesh;
+    }
+
+    /**
+     * Convert an existing Sprite into a Mesh (same texture, size, placement).
+     * The original Sprite is removed from the scene and the new Mesh takes its place.
+     */
+    spriteToMesh(sprite: Sprite, cols = 4, rows = 4): Mesh {
+        const parent = sprite.parentBone;
+        // detach first so the bone no longer drives the old sprite
+        if (parent) sprite.detach();
+
+        const mesh = this.mesh({
+            x: sprite.rect.x,
+            y: sprite.rect.y,
+            width: sprite.rect.displayWidth,
+            height: sprite.rect.displayHeight,
+            texture: sprite.textureKey,
+            name: sprite.name,
+            cols,
+            rows,
+        });
+        if (parent) mesh.attach(parent);
+
+        // remove the old sprite from the scene and the object list
+        sprite.kill();
+        // also hide its Image
+        if (sprite.image) sprite.image.setVisible(false);
+        const objects = useObjectsStore
+            .getState()
+            .objects.filter((o) => o !== sprite);
+        useObjectsStore.getState().setObjects(objects);
+        useObjectsStore.getState().setSelected(mesh);
+        return mesh;
+    }
+
+    /** hook a new rect / sprite / mesh up to the grid, the inspector and the object list */
     private register(rect: Rect) {
         rect.grid = this.grid;
 

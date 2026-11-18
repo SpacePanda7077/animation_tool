@@ -32,22 +32,43 @@ export type ExportBone = {
     connected: boolean;
 };
 
+/** one bone influence on a mesh vertex (weights should sum to ~1) */
+export type ExportVertexWeight = {
+    /** bone name (same names as in `bones`) */
+    bone: string;
+    weight: number;
+};
+
+/** one vertex of a skinned mesh, in the mesh's local space at bind pose */
+export type ExportMeshVertex = {
+    x: number;
+    y: number;
+    u: number;
+    v: number;
+    weights: ExportVertexWeight[];
+};
+
 export type ExportPart = {
     name: string;
-    /** "rect" = a coloured rectangle, "sprite" = a picture (see `image`) */
-    type: "rect" | "sprite";
-    /** sprites only: the image's file name as it was imported (e.g. "arm.png"). Load it in your game under this name. */
+    /** "rect" = coloured rectangle, "sprite" = picture, "mesh" = skinned mesh */
+    type: "rect" | "sprite" | "mesh";
+    /** sprites and meshes: the image file name as it was imported */
     image?: string;
-    /** name of the controlling bone, null = free (world space) */
+    /** name of the controlling bone (hierarchy parent), null = free (world space).
+     *  For meshes this is only the overall transform parent; deformation uses `vertices[].weights`. */
     bone: string | null;
     x: number;
     y: number;
     rotation: number;
     width: number;
     height: number;
-    /** "#rrggbb" (sprites have no fill, they always say "#ffffff") */
+    /** "#rrggbb" (sprites/meshes have no fill, they always say "#ffffff") */
     color: string;
     visible: boolean;
+    /** meshes only: vertices in local space (origin = mesh center at bind) */
+    vertices?: ExportMeshVertex[];
+    /** meshes only: triangle indices (flat list, 3 per triangle) */
+    indices?: number[];
 };
 
 /**
