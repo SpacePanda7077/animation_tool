@@ -17,6 +17,9 @@ type Box = { minX: number; minY: number; maxX: number; maxY: number };
  * Left mouse button only (middle button pans the camera).
  */
 export class BoxSelect {
+    /** true while something else owns the mouse on empty space (mesh editing): no box starts */
+    static suspended = false;
+
     private scene: Scene;
     private gfx: GameObjects.Graphics;
     private start: { x: number; y: number; sx: number; sy: number } | null =
@@ -45,6 +48,7 @@ export class BoxSelect {
 
     private onDown(p: Input.Pointer, over: GameObjects.GameObject[]) {
         if (((p.event as MouseEvent).button ?? 0) !== 0) return;
+        if (BoxSelect.suspended) return;
         // pressing on a bone, rect, handle... is not a box
         if (over.length > 0) return;
         const shift = (p.event as MouseEvent).shiftKey;

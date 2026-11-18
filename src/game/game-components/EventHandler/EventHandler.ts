@@ -4,7 +4,6 @@ import { type ObjectBuilder } from "../objects/object-builder";
 import { duplicateSelection } from "../objects/duplicate";
 import { loadImageFile } from "../objects/objetcs/sprite-texture";
 import { Sprite } from "../objects/objetcs/Sprite";
-import { Mesh } from "../objects/objetcs/Mesh";
 import { Bone } from "../objects/objetcs/Bone";
 import { useObjectsStore } from "../../../store/object-store";
 

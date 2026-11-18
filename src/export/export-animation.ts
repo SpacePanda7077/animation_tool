@@ -260,8 +260,9 @@ export function buildExport(options: ExportOptions): ExportResult {
         }
         if (r instanceof Mesh) {
             const verts: ExportMeshVertex[] = r.vertices.map((v) => ({
-                x: v.x,
-                y: v.y,
+                // the editor keeps vertices in unit space (-0.5..0.5 across the part); the file wants pixels
+                x: v.x * width,
+                y: v.y * height,
                 u: v.u,
                 v: v.v,
                 weights: v.weights

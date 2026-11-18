@@ -2,6 +2,7 @@ import type { Scene } from "phaser";
 import { Bone, type BoneState } from "./objects/objetcs/Bone";
 import { Rect, type RectState } from "./objects/objetcs/Rect";
 import { Sprite, type SpriteState } from "./objects/objetcs/Sprite";
+import { Mesh, type MeshState } from "./objects/objetcs/Mesh";
 import type { ObjectBuilder } from "./objects/object-builder";
 import { useObjectsStore, type Obj } from "../../store/object-store";
 import { animation, type AnimSnapshot } from "./animation";
@@ -30,6 +31,12 @@ export type ProjectDocument = {
         | (RectState & { kind: "rect"; width: number; height: number })
         | (SpriteState & {
               kind: "sprite";
+              width: number;
+              height: number;
+              dataURL?: string;
+          })
+        | (MeshState & {
+              kind: "mesh";
               width: number;
               height: number;
               dataURL?: string;
@@ -86,7 +93,14 @@ export function buildProject(
 
     const parts: ProjectDocument["parts"] = [];
     for (const o of s.objects) {
-        if (o instanceof Sprite) {
+        if (o instanceof Mesh) {
+            const width = o.rect.width;
+            const height = o.rect.height;
+            const snap = o.snapshot();
+            const dataURL = textureDataURL(scene, o.textureKey);
+            if (dataURL) textures[o.textureKey] = dataURL;
+            parts.push({ kind: "mesh", ...snap, width, height, dataURL });
+        } else if (o instanceof Sprite) {
             const width = o.rect.width;
             const height = o.rect.height;
             const snap = o.snapshot();
@@ -216,7 +230,7 @@ export async function applyProject(
         });
 
         for (const p of doc.parts) {
-            if (p.kind === "sprite") {
+            if (p.kind === "sprite" || p.kind === "mesh") {
                 const ok = await ensureTexture(
                     scene,
                     p.texture,
@@ -254,7 +268,21 @@ export async function applyProject(
             const w = Math.max(10, p.width || 100);
             const h = Math.max(10, p.height || 100);
             let part: Rect;
-            if (p.kind === "sprite" && scene.textures.exists(p.texture)) {
+            if (p.kind === "mesh" && scene.textures.exists(p.texture)) {
+                part = builder.mesh({
+                    x: p.x,
+                    y: p.y,
+                    width: w,
+                    height: h,
+                    texture: p.texture,
+                    name: p.name,
+                    cols: p.cols,
+                    rows: p.rows,
+                });
+            } else if (
+                p.kind === "sprite" &&
+                scene.textures.exists(p.texture)
+            ) {
                 part = builder.sprite({
                     x: p.x,
                     y: p.y,
@@ -271,9 +299,9 @@ export async function applyProject(
                     height: h,
                     color: p.kind === "rect" ? p.color : 0x888888,
                 });
-                if (p.kind === "sprite") {
+                if (p.kind === "sprite" || p.kind === "mesh") {
                     warnings.push(
-                        `Sprite “${p.name}” image missing — grey rect used.`,
+                        `${p.kind === "mesh" ? "Mesh" : "Sprite"} “${p.name}” image missing — grey rect used.`,
                     );
                 }
             }

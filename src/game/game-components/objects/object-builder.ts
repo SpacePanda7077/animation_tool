@@ -64,35 +64,40 @@ export class ObjectBuilder {
     }
 
     /**
-     * Convert an existing Sprite into a Mesh (same texture, size, placement).
+     * Convert an existing Sprite into a Mesh (same texture, size, placement, bone and layer).
      * The original Sprite is removed from the scene and the new Mesh takes its place.
      */
     spriteToMesh(sprite: Sprite, cols = 4, rows = 4): Mesh {
         const parent = sprite.parentBone;
+        const store = useObjectsStore.getState();
+        const layer = store.objects.indexOf(sprite);
+
         // detach first so the bone no longer drives the old sprite
         if (parent) sprite.detach();
 
         const mesh = this.mesh({
             x: sprite.rect.x,
             y: sprite.rect.y,
-            width: sprite.rect.displayWidth,
-            height: sprite.rect.displayHeight,
+            width: sprite.rect.width,
+            height: sprite.rect.height,
             texture: sprite.textureKey,
             name: sprite.name,
             cols,
             rows,
         });
+        // keep the scale / rotation / pivot of the sprite too
+        const s = sprite.snapshot();
+        mesh.restore({ ...s, texture: sprite.textureKey });
         if (parent) mesh.attach(parent);
 
-        // remove the old sprite from the scene and the object list
+        // the sprite leaves the scene (undo brings it back); the mesh sits in the sprite's layer, not in front of everything
         sprite.kill();
-        // also hide its Image
-        if (sprite.image) sprite.image.setVisible(false);
-        const objects = useObjectsStore
+        const next = useObjectsStore
             .getState()
-            .objects.filter((o) => o !== sprite);
-        useObjectsStore.getState().setObjects(objects);
-        useObjectsStore.getState().setSelected(mesh);
+            .objects.filter((o) => o !== sprite && o !== mesh);
+        next.splice(layer < 0 ? 0 : Math.min(layer, next.length), 0, mesh);
+        useObjectsStore.getState().setObjects(next);
+        mesh.select();
         return mesh;
     }
 

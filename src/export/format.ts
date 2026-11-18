@@ -39,7 +39,7 @@ export type ExportVertexWeight = {
     weight: number;
 };
 
-/** one vertex of a skinned mesh, in the mesh's local space at bind pose */
+/** one vertex of a skinned mesh, in pixels relative to the mesh center at the setup pose */
 export type ExportMeshVertex = {
     x: number;
     y: number;
@@ -65,7 +65,7 @@ export type ExportPart = {
     /** "#rrggbb" (sprites/meshes have no fill, they always say "#ffffff") */
     color: string;
     visible: boolean;
-    /** meshes only: vertices in local space (origin = mesh center at bind) */
+    /** meshes only: vertices in pixels, relative to the part's center (x right, y down), at the setup pose */
     vertices?: ExportMeshVertex[];
     /** meshes only: triangle indices (flat list, 3 per triangle) */
     indices?: number[];

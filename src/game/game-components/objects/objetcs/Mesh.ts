@@ -1,17 +1,32 @@
-import { Scene, GameObjects, Geom, Math as PMath } from "phaser";
+import type { Scene, GameObjects } from "phaser";
 import { Rect, type RectState } from "./Rect";
-import type { Bone } from "./Bone";
+import { Bone } from "./Bone";
 import type { sprite_config } from "../configuration";
+import {
+    MAX_GRID,
+    autoWeights,
+    barycentric,
+    delaunay,
+    isCorner,
+    keepOpaqueTriangles,
+    makeGrid,
+    mixWeights,
+    neighborLists,
+    paintWeight,
+    smoothWeight,
+    snapUnit,
+    toBoneLocal,
+    type Weight,
+} from "./mesh-math";
 
-/** one bone influence on a vertex (weights should sum to ~1) */
-export type VertexWeight = {
-    boneId: string;
-    weight: number;
-};
+/** one bone's pull on a vertex (the weights of a vertex add up to 1) */
+export type VertexWeight = Weight;
 
-/** bind-pose vertex in the mesh's local space */
+/**
+ * A vertex in the mesh's UNIT space: x, y run from -0.5 to 0.5 across the rectangle (0, 0 = its center),
+ * u, v are the texture coordinates. It is relative to the rectangle, so scaling the rectangle scales the mesh.
+ */
 export type MeshVertex = {
-    /** local position at bind time (relative to mesh pivot / center) */
     x: number;
     y: number;
     u: number;
@@ -23,8 +38,10 @@ export type MeshState = RectState & {
     texture: string;
     cols: number;
     rows: number;
+    /** leave out the triangles that only cover transparent parts of the picture */
+    trim: boolean;
     vertices: MeshVertex[];
-    /** triangle indices (flat list of vertex indices, 3 per triangle) */
+    /** triangle corners (flat list of vertex indices, 3 per triangle) */
     indices: number[];
 };
 
@@ -34,59 +51,60 @@ export type mesh_config = sprite_config & {
     rows?: number;
 };
 
+/** how the weight brush works */
+export type PaintMode = "add" | "remove" | "smooth";
+
+const clampGrid = (n: number) =>
+    Math.max(1, Math.min(MAX_GRID, Math.round(n) || 1));
+
 /**
- * A skinned mesh: textured triangles whose vertices can be influenced by multiple bones.
+ * A skinned mesh: textured triangles whose vertices follow one or more bones.
  *
- * Architecture (same pattern as Sprite):
- * - An invisible Rect does all the editing (handles, pivot, drag, layers, single-bone hierarchy).
- * - A Phaser Mesh renders the deformed geometry.
- * - In setup mode the mesh sits rigidly under its optional parent bone (like a Sprite).
- * - In pose mode vertices are skinned with Linear Blend Skinning using the bind pose
- *   captured when the mesh was created / last rebound.
+ * Same pattern as Sprite: an invisible Rect does all the editing (handles, pivot, dragging, layers, the single
+ * "controlled by" bone) and a Phaser Mesh2D draws the picture on top of it.
+ *
+ *  - setup mode: the mesh is rigid, it sits where its rectangle is.
+ *  - pose mode: a vertex with weights goes to the weighted average of where each of its bones would carry it
+ *    (linear blend skinning). A vertex without weights stays rigid, following the rectangle (and so its bone).
+ *
+ * The bind pose is not stored anywhere: it is captured from the skeleton every time pose mode is entered (the
+ * rectangle and the bones are in their setup pose at that moment), so it can never be out of date, and undo /
+ * redo / save / load only need the vertices and their weights.
  */
 export class Mesh extends Rect {
-    /** every live mesh in the scene (for the global skin pass) */
+    /** every live mesh in the scene */
     static all = new Set<Mesh>();
 
-    /**
-     * After bones have laid out, skin every mesh that has weights.
-     * Call from Bone.layout() when in pose mode.
-     */
-    static skinAll(boneById: Map<string, Bone>) {
-        for (const m of Mesh.all) {
-            if (m.alive) m.skinWithBones(boneById);
-        }
+    /** call once per frame: re-skin every bound mesh (the bones may have moved, rotated, been animated, IK-solved...) */
+    static updateAll() {
+        if (Bone.mode !== "pose") return;
+        for (const m of Mesh.all) if (m.alive && !m.hidden && m.bound) m.writeVertices(true);
     }
 
-    /** Phaser Mesh used for rendering (WebGL only) */
+    /** the Phaser object that draws the triangles; it stays at (0, 0), its vertices are written in world space */
     mesh: GameObjects.Mesh2D;
     textureKey: string;
 
     cols: number;
     rows: number;
+    /** leave out the triangles that only cover transparent parts of the picture */
+    trim = true;
     vertices: MeshVertex[] = [];
+    /** triangle corners, 3 vertex indices per triangle (the export uses this list as it is) */
     indices: number[] = [];
 
-    /**
-     * Bind-pose bone data: boneId -> pivot + angle at bind time.
-     * Used together with per-vertex local offsets for LBS.
-     */
-    private bindBones = new Map<
-        string,
-        { x: number; y: number; angle: number }
-    >();
-
-    /**
-     * For each vertex, for each weight, the position of that vertex in the
-     * bone's local space at bind time. Parallel to vertices[i].weights.
-     * Computed in captureBindPose / autoWeight.
-     */
-    private bindLocals: { x: number; y: number }[][] = [];
-
-    /** true after we have a valid bind pose */
+    /** pose mode: per vertex, per weight, the bone and the vertex in that bone's frame at bind time */
     private bound = false;
+    private bindBones: (Bone | null)[][] = [];
+    private bindX: number[][] = [];
+    private bindY: number[][] = [];
+    private neighbors: number[][] | null = null;
+    /** is the picture opaque here? (unit space) undefined = not read yet, null = can't be read (everything counts as opaque) */
+    private opaque: ((x: number, y: number) => boolean) | null | undefined;
+    private readonly texScene: Scene;
 
     constructor(scene: Scene, config: mesh_config) {
+        // Rect's constructor already calls updateHandles(); syncMesh() ignores that call because there is no mesh yet
         super(scene, {
             x: config.x,
             y: config.y,
@@ -94,107 +112,337 @@ export class Mesh extends Rect {
             height: config.height,
             color: 0xffffff,
         });
-
-        Mesh.all.add(this);
-
+        this.texScene = scene;
         this.textureKey = config.texture;
         this.name = config.name ?? config.texture;
-        this.cols = Math.max(1, config.cols ?? 4);
-        this.rows = Math.max(1, config.rows ?? 4);
+        this.cols = clampGrid(config.cols ?? 4);
+        this.rows = clampGrid(config.rows ?? 4);
 
-        // invisible hit rectangle (same as Sprite)
+        // invisible, but still there to be clicked
         this.rect.setFillStyle(0xffffff, 0);
 
-        // create empty Phaser Mesh; we will fill vertices after grid generation
-        this.mesh = scene.add.mesh(config.x, config.y, config.texture);
-        this.mesh.setOrtho(
-            scene.scale.width / scene.scale.height,
-            1,
-        );
-        // keep everything in the XY plane
-        this.mesh.hideCCW = false;
+        this.mesh = scene.add.mesh2d(0, 0, config.texture, [], []);
+        // the vertices change every frame while posing, so let the renderer draw plain triangles
+        this.mesh.setRenderAsTriangles(true);
 
+        Mesh.all.add(this);
         this.buildGrid();
-        this.captureBindPose();
-        this.syncMesh();
     }
 
     // ------------------------------------------------------------------
-    // Grid generation
+    // Geometry
     // ------------------------------------------------------------------
 
-    /** rebuild vertices + indices as a regular grid covering the current rect size */
+    /** a fresh regular grid over the picture. This clears every weight. */
     buildGrid() {
-        const cols = this.cols;
-        const rows = this.rows;
-        const hw = this.rect.displayWidth / 2;
-        const hh = this.rect.displayHeight / 2;
-
-        const verts: MeshVertex[] = [];
-        for (let j = 0; j <= rows; j++) {
-            for (let i = 0; i <= cols; i++) {
-                const u = i / cols;
-                const v = j / rows;
-                // local space: origin at center, +x right, +y down (Phaser convention)
-                verts.push({
-                    x: -hw + u * this.rect.displayWidth,
-                    y: -hh + v * this.rect.displayHeight,
-                    u,
-                    v,
-                    weights: [],
-                });
-            }
-        }
-
-        const indices: number[] = [];
-        const stride = cols + 1;
-        for (let j = 0; j < rows; j++) {
-            for (let i = 0; i < cols; i++) {
-                const a = j * stride + i;
-                const b = a + 1;
-                const c = a + stride;
-                const d = c + 1;
-                // two triangles per cell
-                indices.push(a, b, c, b, d, c);
-            }
-        }
-
-        this.vertices = verts;
-        this.indices = indices;
-        this.rebuildPhaserMesh();
+        const { verts, tris } = makeGrid(this.cols, this.rows);
+        this.vertices = verts.map((v) => ({ ...v, weights: [] }));
+        this.indices = this.trimmed(tris);
+        this.neighbors = null;
+        this.bound = false;
+        this.rebuildGeometry();
+        this.syncMesh();
+        this.onChange?.(this);
     }
 
-    /** push current vertices/indices into the Phaser Mesh object */
-    private rebuildPhaserMesh() {
-        const verts = this.vertices;
-        const indices = this.indices;
+    /** change the grid detail (setup mode only; this clears every weight) */
+    setGrid(cols: number, rows: number) {
+        if (this.locked) return;
+        const c = clampGrid(cols);
+        const r = clampGrid(rows);
+        if (c === this.cols && r === this.rows) return;
+        this.cols = c;
+        this.rows = r;
+        this.buildGrid();
+    }
 
-        // Phaser Mesh expects interleaved data or separate arrays.
-        // We use clear + addVertices for simplicity.
-        this.mesh.clear();
+    /** hand the vertices (x, y, u, v) and triangles (a, b, c, page) to the Phaser object */
+    private rebuildGeometry() {
+        const verts: number[] = [];
+        for (const v of this.vertices) verts.push(0, 0, v.u, v.v);
+        const idx: number[] = [];
+        for (let i = 0; i < this.indices.length; i += 3)
+            idx.push(
+                this.indices[i],
+                this.indices[i + 1],
+                this.indices[i + 2],
+                0,
+            );
+        this.mesh.vertices = verts;
+        this.mesh.indices = idx;
+    }
 
-        // Build flat arrays for addVertices
-        const positions: number[] = [];
-        const uvs: number[] = [];
-        const colors: number[] = [];
-        const alphas: number[] = [];
+    /** where the rectangle puts a vertex in the world (the rigid placement) */
+    rigidPoint(v: { x: number; y: number }): { x: number; y: number } {
+        const r = this.rect;
+        const lx = v.x * r.displayWidth;
+        const ly = v.y * r.displayHeight;
+        const c = Math.cos(r.rotation);
+        const s = Math.sin(r.rotation);
+        return { x: r.x + lx * c - ly * s, y: r.y + lx * s + ly * c };
+    }
 
-        for (const v of verts) {
-            positions.push(v.x, v.y, 0); // z = 0
-            uvs.push(v.u, v.v);
-            colors.push(0xffffff);
-            alphas.push(1);
+    // ------------------------------------------------------------------
+    // Transparency
+    // ------------------------------------------------------------------
+
+    /** reads the picture once; afterwards "is it opaque here?" is a lookup */
+    private alpha(): (x: number, y: number) => boolean {
+        if (this.opaque === undefined) {
+            try {
+                const img = this.texScene.textures
+                    .get(this.textureKey)
+                    .getSourceImage() as HTMLImageElement | HTMLCanvasElement;
+                const w = img.width;
+                const h = img.height;
+                const canvas = document.createElement("canvas");
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+                ctx.drawImage(img, 0, 0);
+                const data = ctx.getImageData(0, 0, w, h).data;
+                this.opaque = (x, y) => {
+                    const px = Math.max(0, Math.min(w - 1, Math.floor((x + 0.5) * w)));
+                    const py = Math.max(0, Math.min(h - 1, Math.floor((y + 0.5) * h)));
+                    return data[(py * w + px) * 4 + 3] > 10;
+                };
+            } catch {
+                this.opaque = null; // the picture can't be read: keep everything
+            }
+        }
+        const f = this.opaque;
+        return f ?? (() => true);
+    }
+
+    /** the triangles that cover something visible (or all of them if trimming is off or nothing would be left) */
+    private trimmed(tris: number[]): number[] {
+        if (!this.trim) return tris;
+        const kept = keepOpaqueTriangles(this.vertices, tris, this.alpha());
+        return kept.length > 0 ? kept : tris;
+    }
+
+    /** turn the trimming of transparent areas on / off */
+    setTrim(on: boolean) {
+        if (this.locked || on === this.trim) return;
+        this.trim = on;
+        this.retriangulate();
+    }
+
+    // ------------------------------------------------------------------
+    // Vertex editing (setup mode)
+    // ------------------------------------------------------------------
+
+    /** work out the triangles again from the vertices (after adding / removing / moving them) */
+    retriangulate() {
+        this.indices = this.trimmed(delaunay(this.vertices));
+        this.neighbors = null;
+        this.rebuildGeometry();
+        this.syncMesh();
+        this.onChange?.(this);
+    }
+
+    /** a world point -> unit space (the opposite of rigidPoint) */
+    unitFromWorld(wx: number, wy: number): { x: number; y: number } {
+        const r = this.rect;
+        const dx = wx - r.x;
+        const dy = wy - r.y;
+        const c = Math.cos(r.rotation);
+        const s = Math.sin(r.rotation);
+        return {
+            x: (dx * c + dy * s) / (r.displayWidth || 1),
+            y: (-dx * s + dy * c) / (r.displayHeight || 1),
+        };
+    }
+
+    /** the closest vertex within `radius` (world units) of a world point, or -1 */
+    vertexAt(wx: number, wy: number, radius: number): number {
+        let best = -1;
+        let bestD = radius;
+        this.vertices.forEach((v, i) => {
+            const p = this.rigidPoint(v);
+            const d = Math.hypot(p.x - wx, p.y - wy);
+            if (d <= bestD) {
+                bestD = d;
+                best = i;
+            }
+        });
+        return best;
+    }
+
+    isCornerVertex(i: number) {
+        const v = this.vertices[i];
+        return !!v && isCorner(v.x, v.y);
+    }
+
+    /**
+     * Drag a vertex. The picture moves with it (the texture coordinates follow the vertex), so the image is not
+     * distorted. The triangles are only worked out again when you let go: call retriangulate().
+     */
+    moveVertex(i: number, wx: number, wy: number) {
+        const v = this.vertices[i];
+        if (this.locked || !v || isCorner(v.x, v.y)) return;
+        const u = this.unitFromWorld(wx, wy);
+        const p = snapUnit(u.x, u.y);
+        v.x = p.x;
+        v.y = p.y;
+        v.u = p.x + 0.5;
+        v.v = p.y + 0.5;
+        this.mesh.vertices[i * 4 + 2] = v.u;
+        this.mesh.vertices[i * 4 + 3] = v.v;
+        this.syncMesh();
+        this.onChange?.(this);
+    }
+
+    /** add a vertex where you click (it takes its weights from the triangle it lands in). Returns its index, or -1. */
+    addVertexAt(wx: number, wy: number): number {
+        if (this.locked) return -1;
+        const u = this.unitFromWorld(wx, wy);
+        if (Math.abs(u.x) > 0.5 + 1e-9 || Math.abs(u.y) > 0.5 + 1e-9) return -1;
+        const p = snapUnit(u.x, u.y);
+        const near = this.vertices.findIndex(
+            (v) => Math.hypot(v.x - p.x, v.y - p.y) < 0.004,
+        );
+        if (near >= 0) return near;
+
+        // weights: mix the corners of the triangle it lands in; outside every triangle, copy the nearest vertex
+        let weights: VertexWeight[] = [];
+        for (let t = 0; t < this.indices.length; t += 3) {
+            const ia = this.indices[t];
+            const ib = this.indices[t + 1];
+            const ic = this.indices[t + 2];
+            const b = barycentric(p, this.vertices[ia], this.vertices[ib], this.vertices[ic]);
+            if (b && b.every((c) => c >= -1e-9)) {
+                weights = mixWeights(
+                    [ia, ib, ic].map((k) => this.vertices[k].weights),
+                    b,
+                );
+                break;
+            }
+        }
+        if (weights.length === 0 && this.hasWeights) {
+            let best = 0;
+            let bestD = Infinity;
+            this.vertices.forEach((v, i) => {
+                const d = Math.hypot(v.x - p.x, v.y - p.y);
+                if (d < bestD) {
+                    bestD = d;
+                    best = i;
+                }
+            });
+            weights = this.vertices[best].weights.map((w) => ({ ...w }));
         }
 
-        this.mesh.addVertices(
-            positions,
-            uvs,
-            indices,
-            false, // containsZ? we pass z already
-            null as any, // normals
-            colors,
-            alphas,
+        this.vertices.push({ x: p.x, y: p.y, u: p.x + 0.5, v: p.y + 0.5, weights });
+        this.retriangulate();
+        return this.vertices.length - 1;
+    }
+
+    /** delete a vertex (the four corners stay, and so do at least four vertices) */
+    removeVertex(i: number): boolean {
+        if (this.locked || this.isCornerVertex(i) || this.vertices.length <= 4) return false;
+        if (!this.vertices[i]) return false;
+        this.vertices.splice(i, 1);
+        this.retriangulate();
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Weight painting (setup mode)
+    // ------------------------------------------------------------------
+
+    /** how much of `boneId` a vertex has (0 if it has none) */
+    weightOf(i: number, boneId: string): number {
+        return this.vertices[i]?.weights.find((w) => w.boneId === boneId)?.weight ?? 0;
+    }
+
+    /**
+     * One dab of the brush at a world point. Vertices closer than `radius` are changed, most in the middle.
+     *  add: more of the bone, remove: less of it, smooth: blend towards the neighbouring vertices.
+     */
+    paintAt(wx: number, wy: number, radius: number, boneId: string, mode: PaintMode, strength: number) {
+        if (this.locked || Bone.mode !== "setup" || radius <= 0) return;
+        if (mode === "smooth" && !this.neighbors)
+            this.neighbors = neighborLists(this.vertices.length, this.indices);
+        const nb = this.neighbors;
+
+        const next = new Map<number, VertexWeight[]>();
+        this.vertices.forEach((v, i) => {
+            const p = this.rigidPoint(v);
+            const d = Math.hypot(p.x - wx, p.y - wy);
+            if (d > radius) return;
+            const amount = strength * (1 - (d / radius) ** 2);
+            if (mode === "add") next.set(i, paintWeight(v.weights, boneId, amount));
+            else if (mode === "remove") next.set(i, paintWeight(v.weights, boneId, -amount));
+            else
+                next.set(
+                    i,
+                    smoothWeight(
+                        v.weights,
+                        (nb?.[i] ?? []).map((j) => this.vertices[j].weights),
+                        Math.min(1, amount),
+                    ),
+                );
+        });
+        if (next.size === 0) return;
+        // applied after the loop so "smooth" reads the weights from before this dab
+        for (const [i, w] of next) this.vertices[i].weights = w;
+        this.syncMesh();
+        this.onChange?.(this);
+    }
+
+    // ------------------------------------------------------------------
+    // Weights
+    // ------------------------------------------------------------------
+
+    /** true if at least one vertex follows a bone directly */
+    get hasWeights() {
+        return this.vertices.some((v) => v.weights.length > 0);
+    }
+
+    /**
+     * Give every vertex weights from the bones that are nearest to it (setup mode only).
+     * Distance is measured to the whole bone, from its base to its tip.
+     */
+    autoWeight(bones: Bone[], maxBones = 2) {
+        if (this.locked || Bone.mode !== "setup") return;
+        const live = bones.filter((b) => b.alive);
+        if (live.length === 0) return;
+
+        const segs = live.map((b) => ({
+            id: b.id,
+            ax: b.pivot.x,
+            ay: b.pivot.y,
+            bx: b.poll.x,
+            by: b.poll.y,
+        }));
+        const size = Math.max(this.rect.displayWidth, this.rect.displayHeight);
+        const w = autoWeights(
+            this.vertices.map((v) => this.rigidPoint(v)),
+            segs,
+            maxBones,
+            size * 0.02,
         );
+        this.vertices.forEach((v, i) => (v.weights = w[i]));
+        this.syncMesh();
+        this.onChange?.(this);
+    }
+
+    /** back to a rigid mesh (setup mode only) */
+    clearWeights() {
+        if (this.locked) return;
+        for (const v of this.vertices) v.weights = [];
+        this.syncMesh();
+        this.onChange?.(this);
+    }
+
+    /** point weights at other bones (used when a bone chain is duplicated); bones that are not in the map stay as they are */
+    remapBones(map: Map<string, string>) {
+        for (const v of this.vertices)
+            v.weights = v.weights.map((w) => ({
+                boneId: map.get(w.boneId) ?? w.boneId,
+                weight: w.weight,
+            }));
+        this.syncMesh();
     }
 
     // ------------------------------------------------------------------
@@ -202,276 +450,145 @@ export class Mesh extends Rect {
     // ------------------------------------------------------------------
 
     /**
-     * Capture bind pose for the bones that currently influence the mesh.
-     * Must be called while bones are in the pose that should be the rest pose
-     * (normally setup mode). Also builds bindLocals for LBS.
+     * Remember every vertex in the frame of each bone that pulls on it. Must run while the rectangle and the bones
+     * are in their setup pose (that is exactly when enterPose() runs).
      */
-    captureBindPose(bones: Bone[]) {
-        this.bindBones.clear();
-        for (const bone of bones) {
-            this.bindBones.set(bone.id, {
-                x: bone.pivot.x,
-                y: bone.pivot.y,
-                angle: bone.angle,
-            });
+    private bindPose() {
+        this.bound = false;
+        this.bindBones = [];
+        this.bindX = [];
+        this.bindY = [];
+        if (!this.hasWeights) return;
+
+        const byId = new Map<string, Bone>();
+        for (const b of Bone.all) if (b.alive) byId.set(b.id, b);
+
+        for (const v of this.vertices) {
+            const p = this.rigidPoint(v);
+            const bones: (Bone | null)[] = [];
+            const xs: number[] = [];
+            const ys: number[] = [];
+            for (const w of v.weights) {
+                const b = byId.get(w.boneId) ?? null;
+                bones.push(b);
+                const l = b
+                    ? toBoneLocal(p.x, p.y, b.pivot.x, b.pivot.y, b.angle)
+                    : { x: 0, y: 0 };
+                xs.push(l.x);
+                ys.push(l.y);
+            }
+            this.bindBones.push(bones);
+            this.bindX.push(xs);
+            this.bindY.push(ys);
         }
-        this.recomputeBindLocals(bones);
         this.bound = true;
     }
 
     /**
-     * For every vertex / weight, store the vertex position in that bone's
-     * local space at the current (bind) pose.
+     * Write the world position of every vertex into the Phaser object.
+     * skinned = vertices with weights follow their bones; otherwise (or without weights) they follow the rectangle.
      */
-    private recomputeBindLocals(_bones: Bone[]) {
-        // mesh world transform right now (should be the bind placement)
-        const mx = this.rect.x;
-        const my = this.rect.y;
-        const mrot = this.rect.rotation;
-        const mcos = Math.cos(mrot);
-        const msin = Math.sin(mrot);
+    private writeVertices(skinned: boolean) {
+        const out = this.mesh.vertices;
+        // a bone's cosine / sine are the same for all of its vertices: work them out once per call
+        const frames = new Map<Bone, { c: number; s: number }>();
 
-        this.bindLocals = this.vertices.map((v) => {
-            // vertex in world space at bind
-            const wx = mx + v.x * mcos - v.y * msin;
-            const wy = my + v.x * msin + v.y * mcos;
+        for (let i = 0; i < this.vertices.length; i++) {
+            const v = this.vertices[i];
+            let pos: { x: number; y: number } | null = null;
 
-            return v.weights.map(({ boneId }) => {
-                const bind = this.bindBones.get(boneId);
-                if (!bind) return { x: 0, y: 0 };
-                // into bone local: translate by -pivot, rotate by -angle
-                const dx = wx - bind.x;
-                const dy = wy - bind.y;
-                const ca = Math.cos(-bind.angle);
-                const sa = Math.sin(-bind.angle);
-                return {
-                    x: dx * ca - dy * sa,
-                    y: dx * sa + dy * ca,
-                };
-            });
-        });
-    }
-
-    /**
-     * Distance-based auto-weighting.
-     * Each vertex gets weights to the nearest `maxBones` bones.
-     * Call while bones are in their bind (setup) pose.
-     */
-    autoWeight(bones: Bone[], maxBones = 2, influenceRadius?: number) {
-        if (bones.length === 0) return;
-
-        const radius =
-            influenceRadius ??
-            Math.max(this.rect.displayWidth, this.rect.displayHeight) * 0.75;
-
-        const mx = this.rect.x;
-        const my = this.rect.y;
-        const rot = this.rect.rotation;
-        const cos = Math.cos(rot);
-        const sin = Math.sin(rot);
-
-        for (const v of this.vertices) {
-            const wx = mx + v.x * cos - v.y * sin;
-            const wy = my + v.x * sin + v.y * cos;
-
-            const dists = bones.map((b) => ({
-                bone: b,
-                d: PMath.Distance.Between(wx, wy, b.pivot.x, b.pivot.y),
-            }));
-            dists.sort((a, b) => a.d - b.d);
-
-            const chosen = dists
-                .slice(0, maxBones)
-                .filter((d) => d.d < radius * 2);
-
-            if (chosen.length === 0) {
-                v.weights = [{ boneId: dists[0].bone.id, weight: 1 }];
-                continue;
+            if (skinned && v.weights.length > 0) {
+                let sx = 0;
+                let sy = 0;
+                let total = 0;
+                const bones = this.bindBones[i];
+                for (let k = 0; k < v.weights.length; k++) {
+                    const b = bones[k];
+                    const w = v.weights[k].weight;
+                    if (!b || !b.alive || w <= 0) continue;
+                    let f = frames.get(b);
+                    if (!f) {
+                        const a = b.angle;
+                        f = { c: Math.cos(a), s: Math.sin(a) };
+                        frames.set(b, f);
+                    }
+                    const lx = this.bindX[i][k];
+                    const ly = this.bindY[i][k];
+                    sx += (b.pivot.x + lx * f.c - ly * f.s) * w;
+                    sy += (b.pivot.y + lx * f.s + ly * f.c) * w;
+                    total += w;
+                }
+                if (total > 1e-6) pos = { x: sx / total, y: sy / total };
             }
 
-            let sum = 0;
-            const raw = chosen.map(({ bone, d }) => {
-                const w = 1 / (d * d + 1e-4);
-                sum += w;
-                return { boneId: bone.id, weight: w };
-            });
-            v.weights = raw.map((r) => ({
-                boneId: r.boneId,
-                weight: r.weight / sum,
-            }));
+            // no weights (or no bone left to follow): rigid under the rectangle
+            if (!pos) pos = this.rigidPoint(v);
+            out[i * 4] = pos.x;
+            out[i * 4 + 1] = pos.y;
         }
-
-        this.captureBindPose(bones);
-        this.syncMeshRigid();
     }
 
-    /**
-     * Linear Blend Skinning using an explicit bone lookup.
-     * Call every frame in pose mode (and from the runtime player).
-     */
-    skinWithBones(boneById: Map<string, Bone>) {
-        if (this.vertices.length === 0) return;
-
-        const hasWeights = this.vertices.some((v) => v.weights.length > 0);
-        if (!hasWeights || !this.bound) {
-            this.syncMeshRigid();
-            return;
-        }
-
-        // Mesh GameObject stays at origin of the deformed mesh's bounding box
-        // for simplicity we leave it at the rect center and put deformed verts in its local space.
-        const mx = this.rect.x;
-        const my = this.rect.y;
-
-        const positions: number[] = [];
-        const uvs: number[] = [];
-
-        for (let vi = 0; vi < this.vertices.length; vi++) {
-            const v = this.vertices[vi];
-            const locals = this.bindLocals[vi] ?? [];
-
-            let sx = 0;
-            let sy = 0;
-            let totalW = 0;
-
-            for (let wi = 0; wi < v.weights.length; wi++) {
-                const { boneId, weight } = v.weights[wi];
-                if (weight <= 0) continue;
-                const bone = boneById.get(boneId);
-                const local = locals[wi];
-                if (!bone || !local) continue;
-
-                // current bone world matrix * bind local offset
-                const ca = Math.cos(bone.angle);
-                const sa = Math.sin(bone.angle);
-                const wx = bone.pivot.x + local.x * ca - local.y * sa;
-                const wy = bone.pivot.y + local.x * sa + local.y * ca;
-
-                sx += wx * weight;
-                sy += wy * weight;
-                totalW += weight;
-            }
-
-            if (totalW < 1e-6) {
-                // should not happen if weights were assigned
-                sx = mx + v.x;
-                sy = my + v.y;
-            } else {
-                sx /= totalW;
-                sy /= totalW;
-            }
-
-            // store in Mesh GO local space (Mesh GO will be placed at 0,0 rotation 0
-            // so we can just use world positions directly by moving the GO)
-            positions.push(sx, sy, 0);
-            uvs.push(v.u, v.v);
-        }
-
-        this.updatePhaserVertices(positions, uvs);
-        // place the Mesh GO at world origin so its vertex positions are world
-        this.mesh.setPosition(0, 0).setRotation(0);
-        this.mesh.setDepth(this.rect.depth);
-        this.mesh.setVisible(this.alive && !this.hidden);
-    }
-
-    /** rigid placement (no skinning) – used in setup mode and when unbound */
-    private syncMeshRigid() {
-        const r = this.rect;
-        const positions: number[] = [];
-        const uvs: number[] = [];
-        for (const v of this.vertices) {
-            positions.push(v.x, v.y, 0);
-            uvs.push(v.u, v.v);
-        }
-        this.updatePhaserVertices(positions, uvs);
-        this.mesh
-            .setPosition(r.x, r.y)
-            .setRotation(r.rotation)
-            .setDepth(r.depth)
-            .setVisible(this.alive && !this.hidden);
-    }
-
-    private updatePhaserVertices(positions: number[], uvs: number[]) {
-        // Robust path: clear + re-add. Can be optimized later to mutate buffers.
-        this.mesh.clear();
-        const n = this.vertices.length;
-        const colors = new Array(n).fill(0xffffff);
-        const alphas = new Array(n).fill(1);
-        this.mesh.addVertices(
-            positions,
-            uvs,
-            this.indices,
-            false,
-            null as any,
-            colors,
-            alphas,
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Keep mesh in sync with the Rect (same pattern as Sprite)
-    // ------------------------------------------------------------------
-
+    /** put the Phaser object in step with the rectangle (visibility, layer, vertices) */
     private syncMesh() {
-        this.syncMeshRigid();
+        const m = this.mesh;
+        if (!m) return;
+        const visible = this.alive && !this.hidden;
+        m.setVisible(visible).setDepth(this.rect.depth);
+        if (visible) this.writeVertices(this.bound && Bone.mode === "pose");
     }
+
+    // ------------------------------------------------------------------
+    // Keep the mesh in step with the rectangle (same pattern as Sprite)
+    // ------------------------------------------------------------------
 
     updateHandles() {
         super.updateHandles();
-        // In setup mode, if the user scales the rect and we have no weights yet,
-        // rebuild the grid so local verts match the new size.
-        if (!this.bound) {
-            this.buildGrid();
-        }
         this.syncMesh();
     }
 
     setLayer(depth: number) {
         super.setLayer(depth);
-        this.mesh.setDepth(depth);
+        this.syncMesh();
     }
 
     setVisible(v: boolean) {
         super.setVisible(v);
-        this.mesh.setVisible(this.alive && !this.hidden);
+        this.syncMesh();
     }
 
     kill() {
         super.kill();
-        this.mesh.setVisible(false);
         Mesh.all.delete(this);
+        this.syncMesh();
     }
 
     revive() {
         super.revive();
         Mesh.all.add(this);
-        this.mesh.setVisible(this.alive && !this.hidden);
+        this.syncMesh();
     }
 
+    /** meshes have no fill color (the rectangle must stay invisible) */
     setColor(_color: number) {
         void _color;
     }
 
-    /** called by the bone in pose mode (rigid part of the hierarchy) */
-    followBone() {
-        super.followBone();
-        // Actual vertex skinning is done from the scene tick via skinWithBones()
-        // so we have a complete bone map. Until weights exist we stay rigid.
-        if (!this.bound) this.syncMesh();
-    }
-
+    /** entering pose mode: the skeleton and the rectangle are in setup pose right now, so bind to them */
     enterPose() {
         super.enterPose();
-        if (!this.bound) this.syncMesh();
+        this.bindPose();
+        this.syncMesh();
     }
 
+    /** back to setup mode: rigid again */
     exitPose() {
         super.exitPose();
+        this.bound = false;
         this.syncMesh();
     }
 
     // ------------------------------------------------------------------
-    // Undo / redo
+    // Undo / redo / save
     // ------------------------------------------------------------------
 
     snapshot(): MeshState {
@@ -480,6 +597,7 @@ export class Mesh extends Rect {
             texture: this.textureKey,
             cols: this.cols,
             rows: this.rows,
+            trim: this.trim,
             vertices: this.vertices.map((v) => ({
                 x: v.x,
                 y: v.y,
@@ -496,26 +614,31 @@ export class Mesh extends Rect {
             texture?: string;
             cols?: number;
             rows?: number;
+            trim?: boolean;
             vertices?: MeshVertex[];
             indices?: number[];
         },
     ) {
-        super.restore(s);
-        this.rect.setFillStyle(0xffffff, 0);
+        super.restore(s); // this also gives the rectangle a fill again...
+        this.rect.setFillStyle(0xffffff, 0); // ...so take it away
         if (s.texture && s.texture !== this.textureKey) {
             this.textureKey = s.texture;
             this.mesh.setTexture(s.texture);
+            this.opaque = undefined; // another picture: read it again when needed
         }
-        if (s.cols !== undefined) this.cols = s.cols;
-        if (s.rows !== undefined) this.rows = s.rows;
-        if (s.vertices) {
+        if (s.trim !== undefined) this.trim = s.trim;
+        if (s.cols !== undefined) this.cols = clampGrid(s.cols);
+        if (s.rows !== undefined) this.rows = clampGrid(s.rows);
+        if (s.vertices && s.indices) {
             this.vertices = s.vertices.map((v) => ({
                 ...v,
                 weights: v.weights.map((w) => ({ ...w })),
             }));
+            this.indices = [...s.indices];
+            this.neighbors = null;
+            this.rebuildGeometry();
         }
-        if (s.indices) this.indices = [...s.indices];
-        this.rebuildPhaserMesh();
+        this.bound = false;
         this.syncMesh();
     }
 }

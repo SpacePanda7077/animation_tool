@@ -10,6 +10,9 @@ import { initProjectPersistence } from "../game-components/project";
 import { useObjectsStore } from "../../store/object-store";
 import { Rect } from "../game-components/objects/objetcs/Rect";
 import { Bone } from "../game-components/objects/objetcs/Bone";
+import { Mesh } from "../game-components/objects/objetcs/Mesh";
+import { MeshEditor } from "../game-components/mesh-editor";
+import { useMeshEditStore } from "../../store/mesh-edit-store";
 import { BoxSelect } from "../game-components/box-select";
 
 export class Game extends Scene {
@@ -18,6 +21,7 @@ export class Game extends Scene {
     grid: Grid;
     private unsubMode: (() => void) | null = null;
     private boxSelect: BoxSelect | null = null;
+    private meshEditor: MeshEditor | null = null;
 
     constructor() {
         super("Game");
@@ -111,6 +115,12 @@ export class Game extends Scene {
     };
     private onToggleGhost = () => this.setGhost(!Bone.ghost);
 
+    /** every frame: skinned meshes follow their bones (bones can move, be animated or IK-solved at any time) */
+    update() {
+        Mesh.updateAll();
+        this.meshEditor?.update();
+    }
+
     create() {
         this.cameras.main.centerOn(0, 0);
         // in your scene's create()
@@ -131,6 +141,7 @@ export class Game extends Scene {
         this.EventHandler = new EventHandler(this.objectBuilder);
         this.EventHandler.handleEvents();
         this.boxSelect = new BoxSelect(this);
+        this.meshEditor = new MeshEditor(this, (on) => this.setGhost(on));
         animation.init(this, this.objectBuilder);
         history.init(this, this.objectBuilder);
         // Register scene for manual Save / Load (no auto-restore on refresh)
@@ -172,6 +183,9 @@ export class Game extends Scene {
 
         const cleanup = () => {
             this.EventHandler.destroy();
+            useMeshEditStore.getState().end();
+            this.meshEditor?.destroy();
+            this.meshEditor = null;
             this.boxSelect?.destroy();
             this.boxSelect = null;
             Rect.setGroup([]);
@@ -183,6 +197,7 @@ export class Game extends Scene {
             EventBus.off("toggle-ghost", this.onToggleGhost);
             this.input?.keyboard?.off("keydown", this.onGhostKey);
             Bone.all.clear();
+            Mesh.all.clear();
             this.unsubMode?.();
             this.unsubMode = null;
         };

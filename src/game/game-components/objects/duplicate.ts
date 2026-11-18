@@ -1,5 +1,6 @@
 import { Rect } from "./objetcs/Rect";
 import { Sprite } from "./objetcs/Sprite";
+import { Mesh } from "./objetcs/Mesh";
 import { Bone } from "./objetcs/Bone";
 import type { ObjectBuilder } from "./object-builder";
 import { useObjectsStore } from "../../../store/object-store";
@@ -17,9 +18,16 @@ function duplicateRect(builder: ObjectBuilder, src: Rect): Rect {
         height: src.rect.height,
     };
     const copy =
-        src instanceof Sprite
-            ? builder.sprite({ ...base, texture: src.textureKey })
-            : builder.rect({ ...base, color: s.color });
+        src instanceof Mesh
+            ? builder.mesh({
+                  ...base,
+                  texture: src.textureKey,
+                  cols: src.cols,
+                  rows: src.rows,
+              })
+            : src instanceof Sprite
+              ? builder.sprite({ ...base, texture: src.textureKey })
+              : builder.rect({ ...base, color: s.color });
     copy.restore({
         ...s,
         name: `${src.name} copy`,
@@ -76,11 +84,19 @@ function duplicateBoneTree(builder: ObjectBuilder, root: Bone): Bone {
     top.layout();
 
     // the rects the original bones control get copies controlled by the new bones
+    const copies: Rect[] = [];
     for (const [srcBone, newBone] of map) {
         for (const a of [...srcBone.attachments]) {
-            if (a instanceof Rect) duplicateRect(builder, a).attach(newBone);
+            if (!(a instanceof Rect)) continue;
+            const c = duplicateRect(builder, a);
+            c.attach(newBone);
+            copies.push(c);
         }
     }
+    // a copied mesh follows the copied bones, not the originals
+    const ids = new Map<string, string>();
+    for (const [a, b] of map) ids.set(a.id, b.id);
+    for (const c of copies) if (c instanceof Mesh) c.remapBones(ids);
     return top;
 }
 

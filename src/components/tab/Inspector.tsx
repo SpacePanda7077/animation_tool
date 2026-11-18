@@ -6,6 +6,7 @@ import { Mesh } from "../../game/game-components/objects/objetcs/Mesh";
 import { Bone } from "../../game/game-components/objects/objetcs/Bone";
 import { IKConstraint } from "../../game/game-components/ik";
 import { EventBus } from "../../game/EventBus";
+import { useMeshEditStore } from "../../store/mesh-edit-store";
 
 const fmt = (v: number) => String(Math.round(v * 100) / 100);
 /** wrap degrees into -180..180 for display */
@@ -20,10 +21,150 @@ export default function Inspector() {
                     <Layers />
                 </div>
                 <div className="h-0 border-t-2 border-[#878080]" />
-                <div className="flex-1 min-h-0 overflow-y-auto p-3">
+                <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
+                    <MeshEditPanel />
                     <Properties />
                 </div>
             </div>
+        </div>
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* Mesh editing (vertices / weight painting)                           */
+/* ------------------------------------------------------------------ */
+
+function MeshEditPanel() {
+    const target = useMeshEditStore((s) => s.target);
+    const tool = useMeshEditStore((s) => s.tool);
+    const brush = useMeshEditStore((s) => s.brush);
+    const strength = useMeshEditStore((s) => s.strength);
+    const paint = useMeshEditStore((s) => s.paint);
+    const { end, setTool, setBrush, setStrength, setPaint } =
+        useMeshEditStore.getState();
+    useObjectsStore((s) => s.version); // weights / vertices change -> refresh
+    useObjectsStore((s) => s.selected); // the active bone changes with the selection
+    if (!target) return null;
+
+    const bone = Bone.active && Bone.active.alive ? Bone.active : null;
+    const tab = (id: "weights" | "vertices", label: string) => (
+        <button
+            className={`flex-1 text-xs rounded px-2 py-1 text-white ${tool === id ? "bg-[#7a6f6f]" : "bg-[#4c4747] hover:bg-[#5d5757]"}`}
+            onClick={() => setTool(id)}
+        >
+            {label}
+        </button>
+    );
+    const mode = (id: "add" | "remove" | "smooth", label: string) => (
+        <button
+            className={`flex-1 text-xs rounded px-2 py-1 text-white ${paint === id ? "bg-[#7a6f6f]" : "bg-[#4c4747] hover:bg-[#5d5757]"}`}
+            onClick={() => setPaint(id)}
+        >
+            {label}
+        </button>
+    );
+
+    return (
+        <div className="flex flex-col gap-2 rounded border border-[#878080] p-2">
+            <div className="flex items-center justify-between">
+                <div className="text-xs text-white truncate">
+                    Editing mesh: {target.name}
+                </div>
+                <button
+                    className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
+                    onClick={end}
+                    title="Esc"
+                >
+                    Done
+                </button>
+            </div>
+            <div className="flex gap-1">
+                {tab("weights", "Paint weights")}
+                {tab("vertices", "Edit vertices")}
+            </div>
+
+            {tool === "weights" ? (
+                <>
+                    <div className="text-xs text-[#b5b0b0]">
+                        Painting:{" "}
+                        <span className="text-white">
+                            {bone ? bone.name : "pick a bone in the list above"}
+                        </span>
+                    </div>
+                    <div className="flex gap-1">
+                        {mode("add", "Add")}
+                        {mode("remove", "Remove")}
+                        {mode("smooth", "Smooth")}
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
+                        <span className="w-14">Brush</span>
+                        <input
+                            type="range"
+                            min={5}
+                            max={200}
+                            value={brush}
+                            onChange={(e) => setBrush(Number(e.target.value))}
+                            className="flex-1"
+                        />
+                        <span className="w-8 text-right text-white">{brush}</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
+                        <span className="w-14">Strength</span>
+                        <input
+                            type="range"
+                            min={1}
+                            max={100}
+                            value={Math.round(strength * 100)}
+                            onChange={(e) =>
+                                setStrength(Number(e.target.value) / 100)
+                            }
+                            className="flex-1"
+                        />
+                        <span className="w-8 text-right text-white">
+                            {Math.round(strength * 100)}
+                        </span>
+                    </label>
+                    <div className="flex gap-2 justify-end">
+                        <button
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            disabled={!target.hasWeights}
+                            onClick={() => target.clearWeights()}
+                        >
+                            Clear weights
+                        </button>
+                        <button
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
+                            onClick={() => {
+                                const bones = [...Bone.all].filter((b) => b.alive);
+                                if (bones.length) target.autoWeight(bones, 2);
+                            }}
+                        >
+                            Auto-weight
+                        </button>
+                    </div>
+                    <div className="text-[11px] text-[#878080]">
+                        Drag on the canvas to paint. Hold Alt for the opposite
+                        of the chosen mode. Blue = none of this bone, red =
+                        all of it, grey = no weights yet (rigid).
+                    </div>
+                </>
+            ) : (
+                <>
+                    <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
+                        <input
+                            type="checkbox"
+                            checked={target.trim}
+                            onChange={(e) => target.setTrim(e.target.checked)}
+                        />
+                        Trim transparent areas
+                    </label>
+                    <div className="text-[11px] text-[#878080]">
+                        Drag a vertex to move it. Click an empty spot to add
+                        one (it keeps the weights around it). Shift + click a
+                        vertex to delete it. The four orange corners stay put.
+                    </div>
+                </>
+            )}
         </div>
     );
 }
@@ -483,29 +624,80 @@ function Properties() {
             {mesh && (
                 <Group label="Mesh">
                     <Info label="Texture" value={mesh.textureKey} />
-                    <Info label="Grid" value={`${mesh.cols} × ${mesh.rows}`} />
                     <Info
                         label="Vertices"
                         value={String(mesh.vertices.length)}
                     />
                     <Info
                         label="Weighted"
-                        value={
-                            mesh.vertices.some((v) => v.weights.length > 0)
-                                ? "yes"
-                                : "no (rigid)"
-                        }
+                        value={mesh.hasWeights ? "yes" : "no (rigid)"}
                     />
-                    <button
+                    <NumberField
+                        label="Columns"
+                        value={mesh.cols}
                         disabled={posing}
-                        className="self-end text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
-                        onClick={() => {
-                            const bones = [...Bone.all].filter((b) => b.alive);
-                            if (bones.length) mesh.autoWeight(bones, 2);
-                        }}
-                    >
-                        Auto-weight
-                    </button>
+                        onCommit={(v) => mesh.setGrid(v, mesh.rows)}
+                    />
+                    <NumberField
+                        label="Rows"
+                        value={mesh.rows}
+                        disabled={posing}
+                        onCommit={(v) => mesh.setGrid(mesh.cols, v)}
+                    />
+                    <label className="col-span-2 flex items-center gap-2 text-xs text-[#b5b0b0]">
+                        <input
+                            type="checkbox"
+                            checked={mesh.trim}
+                            disabled={posing}
+                            onChange={(e) => mesh.setTrim(e.target.checked)}
+                        />
+                        Trim transparent areas
+                    </label>
+                    <div className="col-span-2 flex gap-2 justify-end">
+                        <button
+                            disabled={posing}
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            onClick={() =>
+                                useMeshEditStore.getState().begin(mesh, "vertices")
+                            }
+                        >
+                            Edit vertices
+                        </button>
+                        <button
+                            disabled={posing}
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            onClick={() =>
+                                useMeshEditStore.getState().begin(mesh, "weights")
+                            }
+                        >
+                            Paint weights
+                        </button>
+                    </div>
+                    <div className="flex gap-2 justify-end">
+                        <button
+                            disabled={posing || !mesh.hasWeights}
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            onClick={() => mesh.clearWeights()}
+                        >
+                            Clear weights
+                        </button>
+                        <button
+                            disabled={posing}
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            onClick={() => {
+                                const bones = [...Bone.all].filter(
+                                    (b) => b.alive,
+                                );
+                                if (bones.length) mesh.autoWeight(bones, 2);
+                            }}
+                        >
+                            Auto-weight
+                        </button>
+                    </div>
+                    <div className="text-[11px] text-[#878080]">
+                        Auto-weight uses every bone. Changing the grid clears
+                        the weights. Paint to refine them.
+                    </div>
                 </Group>
             )}
 
@@ -576,7 +768,7 @@ function Properties() {
                 />
             </Group>
 
-            {!sprite && (
+            {!sprite && !mesh && (
                 <Group label="Color">
                     <label className="flex items-center gap-2 text-xs text-[#b5b0b0]">
                         <input
