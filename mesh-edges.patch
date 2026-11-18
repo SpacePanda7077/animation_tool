@@ -1,0 +1,676 @@
+--- a/src/game/game-components/objects/objetcs/Mesh.ts	2026-11-18 19:17:17.948000000 +0000
++++ b/src/game/game-components/objects/objetcs/Mesh.ts	2026-11-18 19:17:18.391000000 +0000
+@@ -6,7 +6,8 @@
+     MAX_GRID,
+     autoWeights,
+     barycentric,
+-    delaunay,
++    constrainedDelaunay,
++    edgeKey,
+     isCorner,
+     keepOpaqueTriangles,
+     makeGrid,
+@@ -43,10 +44,12 @@
+     vertices: MeshVertex[];
+     /** triangle corners (flat list of vertex indices, 3 per triangle) */
+     indices: number[];
++    /** forced edges [a, b] vertex indices (Spine-style); triangulation will not cross them */
++    edges: [number, number][];
+ };
+ 
+ export type mesh_config = sprite_config & {
+-    /** grid subdivision (default 4x4) */
++    /** grid subdivision (default 1x1 = just the four corners) */
+     cols?: number;
+     rows?: number;
+ };
+@@ -92,6 +95,8 @@
+     vertices: MeshVertex[] = [];
+     /** triangle corners, 3 vertex indices per triangle (the export uses this list as it is) */
+     indices: number[] = [];
++    /** forced edges (Spine-style orange lines); triangulation will not cross them */
++    edges: [number, number][] = [];
+ 
+     /** pose mode: per vertex, per weight, the bone and the vertex in that bone's frame at bind time */
+     private bound = false;
+@@ -115,8 +120,8 @@
+         this.texScene = scene;
+         this.textureKey = config.texture;
+         this.name = config.name ?? config.texture;
+-        this.cols = clampGrid(config.cols ?? 4);
+-        this.rows = clampGrid(config.rows ?? 4);
++        this.cols = clampGrid(config.cols ?? 1);
++        this.rows = clampGrid(config.rows ?? 1);
+ 
+         // invisible, but still there to be clicked
+         this.rect.setFillStyle(0xffffff, 0);
+@@ -133,10 +138,11 @@
+     // Geometry
+     // ------------------------------------------------------------------
+ 
+-    /** a fresh regular grid over the picture. This clears every weight. */
++    /** a fresh regular grid over the picture. This clears every weight and every forced edge. */
+     buildGrid() {
+         const { verts, tris } = makeGrid(this.cols, this.rows);
+         this.vertices = verts.map((v) => ({ ...v, weights: [] }));
++        this.edges = [];
+         this.indices = this.trimmed(tris);
+         this.neighbors = null;
+         this.bound = false;
+@@ -156,6 +162,18 @@
+         this.buildGrid();
+     }
+ 
++    /**
++     * Throw away every extra vertex and go back to just the four corners.
++     * Use this when the auto grid (or previous edits) left you with vertices you don't want.
++     * Clears weights.
++     */
++    resetToCorners() {
++        if (this.locked) return;
++        this.cols = 1;
++        this.rows = 1;
++        this.buildGrid();
++    }
++
+     /** hand the vertices (x, y, u, v) and triangles (a, b, c, page) to the Phaser object */
+     private rebuildGeometry() {
+         const verts: number[] = [];
+@@ -234,13 +252,92 @@
+ 
+     /** work out the triangles again from the vertices (after adding / removing / moving them) */
+     retriangulate() {
+-        this.indices = this.trimmed(delaunay(this.vertices));
++        // drop edges that point at missing vertices
++        this.edges = this.edges.filter(
++            ([a, b]) =>
++                a >= 0 &&
++                b >= 0 &&
++                a < this.vertices.length &&
++                b < this.vertices.length &&
++                a !== b,
++        );
++        this.indices = this.trimmed(
++            constrainedDelaunay(this.vertices, this.edges),
++        );
+         this.neighbors = null;
+         this.rebuildGeometry();
+         this.syncMesh();
+         this.onChange?.(this);
+     }
+ 
++    /** true if these two vertices are already joined by a forced edge */
++    hasEdge(a: number, b: number): boolean {
++        const k = edgeKey(a, b);
++        return this.edges.some(([u, v]) => edgeKey(u, v) === k);
++    }
++
++    /**
++     * Force an edge between two vertices (Spine-style orange line).
++     * Triangles will not cross it. Returns false if the edge already exists or the indices are bad.
++     */
++    addEdge(a: number, b: number): boolean {
++        if (this.locked) return false;
++        if (
++            a === b ||
++            a < 0 ||
++            b < 0 ||
++            a >= this.vertices.length ||
++            b >= this.vertices.length
++        )
++            return false;
++        if (this.hasEdge(a, b)) return false;
++        this.edges.push(a < b ? [a, b] : [b, a]);
++        this.retriangulate();
++        return true;
++    }
++
++    /** remove a forced edge if it exists */
++    removeEdge(a: number, b: number): boolean {
++        if (this.locked) return false;
++        const k = edgeKey(a, b);
++        const before = this.edges.length;
++        this.edges = this.edges.filter(([u, v]) => edgeKey(u, v) !== k);
++        if (this.edges.length === before) return false;
++        this.retriangulate();
++        return true;
++    }
++
++    /**
++     * The closest forced edge within `radius` (world units) of a world point, or -1.
++     * Distance is measured to the segment in world space.
++     */
++    edgeAt(wx: number, wy: number, radius: number): number {
++        let best = -1;
++        let bestD = radius;
++        const pts = this.vertices.map((v) => this.rigidPoint(v));
++        this.edges.forEach(([a, b], i) => {
++            const A = pts[a];
++            const B = pts[b];
++            if (!A || !B) return;
++            const dx = B.x - A.x;
++            const dy = B.y - A.y;
++            const len2 = dx * dx + dy * dy;
++            const t =
++                len2 < 1e-9
++                    ? 0
++                    : Math.max(
++                          0,
++                          Math.min(1, ((wx - A.x) * dx + (wy - A.y) * dy) / len2),
++                      );
++            const d = Math.hypot(wx - (A.x + t * dx), wy - (A.y + t * dy));
++            if (d <= bestD) {
++                bestD = d;
++                best = i;
++            }
++        });
++        return best;
++    }
++
+     /** a world point -> unit space (the opposite of rigidPoint) */
+     unitFromWorld(wx: number, wy: number): { x: number; y: number } {
+         const r = this.rect;
+@@ -339,9 +436,17 @@
+ 
+     /** delete a vertex (the four corners stay, and so do at least four vertices) */
+     removeVertex(i: number): boolean {
+-        if (this.locked || this.isCornerVertex(i) || this.vertices.length <= 4) return false;
++        if (this.locked || this.isCornerVertex(i) || this.vertices.length <= 4)
++            return false;
+         if (!this.vertices[i]) return false;
+         this.vertices.splice(i, 1);
++        // drop edges that used this vertex; renumber the rest
++        this.edges = this.edges
++            .filter(([a, b]) => a !== i && b !== i)
++            .map(
++                ([a, b]) =>
++                    [a > i ? a - 1 : a, b > i ? b - 1 : b] as [number, number],
++            );
+         this.retriangulate();
+         return true;
+     }
+@@ -616,6 +721,7 @@
+                 weights: v.weights.map((w) => ({ ...w })),
+             })),
+             indices: [...this.indices],
++            edges: this.edges.map(([a, b]) => [a, b]),
+         };
+     }
+ 
+@@ -627,6 +733,7 @@
+             trim?: boolean;
+             vertices?: MeshVertex[];
+             indices?: number[];
++            edges?: [number, number][];
+         },
+     ) {
+         super.restore(s); // this also gives the rectangle a fill again...
+@@ -645,6 +752,7 @@
+                 weights: v.weights.map((w) => ({ ...w })),
+             }));
+             this.indices = [...s.indices];
++            this.edges = (s.edges ?? []).map(([a, b]) => [a, b]);
+             this.neighbors = null;
+             this.rebuildGeometry();
+         }
+--- a/src/game/game-components/objects/objetcs/mesh-math.ts	2026-11-18 19:17:18.842000000 +0000
++++ b/src/game/game-components/objects/objetcs/mesh-math.ts	2026-11-18 19:17:19.326000000 +0000
+@@ -263,6 +263,162 @@
+     return out;
+ }
+ 
++/** ordered edge key so (a,b) and (b,a) are the same */
++export function edgeKey(a: number, b: number): string {
++    return a < b ? `${a},${b}` : `${b},${a}`;
++}
++
++/** true if segments ab and cd properly cross (share an interior point) */
++function segmentsCross(
++    ax: number,
++    ay: number,
++    bx: number,
++    by: number,
++    cx: number,
++    cy: number,
++    dx: number,
++    dy: number,
++): boolean {
++    const orient = (
++        px: number,
++        py: number,
++        qx: number,
++        qy: number,
++        rx: number,
++        ry: number,
++    ) => (qy - py) * (rx - qx) - (qx - px) * (ry - qy);
++    const o1 = orient(ax, ay, bx, by, cx, cy);
++    const o2 = orient(ax, ay, bx, by, dx, dy);
++    const o3 = orient(cx, cy, dx, dy, ax, ay);
++    const o4 = orient(cx, cy, dx, dy, bx, by);
++    // proper intersection only (ignore shared endpoints)
++    if (Math.abs(o1) < 1e-14 || Math.abs(o2) < 1e-14) return false;
++    if (Math.abs(o3) < 1e-14 || Math.abs(o4) < 1e-14) return false;
++    return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
++}
++
++/**
++ * Delaunay triangulation that also keeps the given constrained edges.
++ * Constraints that cross each other or sit outside the point set are skipped.
++ * Implementation: unconstrained Delaunay, then force each constraint in with edge flips.
++ */
++export function constrainedDelaunay(
++    pts: P2[],
++    constraints: [number, number][],
++): number[] {
++    let tris = delaunay(pts);
++    if (tris.length === 0 || constraints.length === 0) return tris;
++
++    const n = pts.length;
++    const hasEdge = (a: number, b: number, list: number[]) => {
++        const lo = Math.min(a, b);
++        const hi = Math.max(a, b);
++        for (let t = 0; t < list.length; t += 3) {
++            const v = [list[t], list[t + 1], list[t + 2]];
++            for (let i = 0; i < 3; i++) {
++                const u = v[i];
++                const w = v[(i + 1) % 3];
++                if (Math.min(u, w) === lo && Math.max(u, w) === hi) return true;
++            }
++        }
++        return false;
++    };
++
++    // find the two triangles that share edge (u,v); returns [opp0, opp1] or null
++    const opposites = (
++        u: number,
++        v: number,
++        list: number[],
++    ): [number, number] | null => {
++        const found: number[] = [];
++        for (let t = 0; t < list.length; t += 3) {
++            const a = list[t];
++            const b = list[t + 1];
++            const c = list[t + 2];
++            const verts = [a, b, c];
++            if (
++                verts.includes(u) &&
++                verts.includes(v) &&
++                verts.filter((x) => x !== u && x !== v).length === 1
++            ) {
++                found.push(verts.find((x) => x !== u && x !== v)!);
++            }
++        }
++        return found.length === 2 ? [found[0], found[1]] : null;
++    };
++
++    for (const [ca, cb] of constraints) {
++        if (
++            ca === cb ||
++            ca < 0 ||
++            cb < 0 ||
++            ca >= n ||
++            cb >= n ||
++            hasEdge(ca, cb, tris)
++        )
++            continue;
++
++        // flip edges that cross the constraint until (ca,cb) is present or we give up
++        for (let guard = 0; guard < 64 && !hasEdge(ca, cb, tris); guard++) {
++            let flipped = false;
++            for (let t = 0; t < tris.length && !flipped; t += 3) {
++                const a = tris[t];
++                const b = tris[t + 1];
++                const c = tris[t + 2];
++                const edges: [number, number][] = [
++                    [a, b],
++                    [b, c],
++                    [c, a],
++                ];
++                for (const [u, v] of edges) {
++                    if (
++                        !segmentsCross(
++                            pts[ca].x,
++                            pts[ca].y,
++                            pts[cb].x,
++                            pts[cb].y,
++                            pts[u].x,
++                            pts[u].y,
++                            pts[v].x,
++                            pts[v].y,
++                        )
++                    )
++                        continue;
++                    const opp = opposites(u, v, tris);
++                    if (!opp) continue;
++                    const [p, q] = opp;
++                    // flip uv -> pq: replace the two triangles (u,v,p) and (u,v,q) with (p,q,u) and (p,q,v)
++                    const next: number[] = [];
++                    for (let i = 0; i < tris.length; i += 3) {
++                        const ta = tris[i];
++                        const tb = tris[i + 1];
++                        const tc = tris[i + 2];
++                        const set = new Set([ta, tb, tc]);
++                        const isUVP =
++                            set.has(u) &&
++                            set.has(v) &&
++                            set.has(p) &&
++                            set.size === 3;
++                        const isUVQ =
++                            set.has(u) &&
++                            set.has(v) &&
++                            set.has(q) &&
++                            set.size === 3;
++                        if (isUVP || isUVQ) continue;
++                        next.push(ta, tb, tc);
++                    }
++                    next.push(p, q, u, p, q, v);
++                    tris = next;
++                    flipped = true;
++                    break;
++                }
++            }
++            if (!flipped) break; // cannot force this constraint (e.g. crosses another constraint)
++        }
++    }
++    return tris;
++}
++
+ /**
+  * Drop the triangles that only cover see-through parts of the picture.
+  * A triangle stays if any of a small lattice of sample points inside it is opaque (`opaque` gets unit-space x, y).
+--- a/src/game/game-components/mesh-editor.ts	2026-11-18 19:17:19.640000000 +0000
++++ b/src/game/game-components/mesh-editor.ts	2026-11-18 19:17:20.019000000 +0000
+@@ -19,7 +19,12 @@
+ /**
+  * Edits a mesh on the canvas (see mesh-edit-store for what is being edited):
+  *
+- *  vertices tool: drag a vertex to move it, click an empty spot to add one, Shift + click a vertex to delete it.
++ *  vertices tool:
++ *    - drag a vertex to move it
++ *    - click an empty spot to add one
++ *    - Shift + click a vertex to delete it
++ *    - Ctrl + drag from one vertex to another to create a forced edge (orange)
++ *    - Shift + click near an edge to delete it
+  *  weights tool:  paint with the brush. It paints the active bone (pick it in the layers list). Alt flips
+  *                 add / remove while you hold it.
+  *
+@@ -34,6 +39,8 @@
+     private painting = false;
+     private dragging = -1;
+     private moved = false;
++    /** Ctrl+drag: vertex we started from when drawing a forced edge */
++    private linking = -1;
+     private pointer: { x: number; y: number } | null = null;
+     private prevGhost = false;
+     private disabled: Rect[] = [];
+@@ -113,6 +120,7 @@
+         this.mesh = null;
+         this.painting = false;
+         this.dragging = -1;
++        this.linking = -1;
+         this.gfx.clear();
+     }
+ 
+@@ -129,6 +137,7 @@
+         const mesh = this.mesh;
+         if (!mesh || ((p.event as MouseEvent).button ?? 0) !== 0) return;
+         this.pointer = { x: p.worldX, y: p.worldY };
++        const ev = p.event as MouseEvent;
+ 
+         if (this.tool === "weights") {
+             this.painting = true;
+@@ -138,14 +147,29 @@
+ 
+         const hit = mesh.vertexAt(p.worldX, p.worldY, 10 * Rect.ui);
+         if (hit >= 0) {
+-            if ((p.event as MouseEvent).shiftKey) mesh.removeVertex(hit);
+-            else {
++            if (ev.shiftKey) {
++                mesh.removeVertex(hit);
++            } else if (ev.ctrlKey || ev.metaKey) {
++                // start drawing a forced edge from this vertex
++                this.linking = hit;
++            } else {
+                 this.dragging = hit;
+                 this.moved = false;
+             }
+             return;
+         }
+-        // an empty spot: new vertex, and you can keep dragging it
++
++        // Shift + click near an edge deletes it
++        if (ev.shiftKey) {
++            const ei = mesh.edgeAt(p.worldX, p.worldY, 8 * Rect.ui);
++            if (ei >= 0) {
++                const [a, b] = mesh.edges[ei];
++                mesh.removeEdge(a, b);
++            }
++            return;
++        }
++
++        // empty spot: new vertex, and you can keep dragging it
+         const added = mesh.addVertexAt(p.worldX, p.worldY);
+         if (added >= 0) {
+             this.dragging = added;
+@@ -162,6 +186,10 @@
+             this.onUp();
+             return;
+         }
++        if (this.linking >= 0) {
++            // only update the ghost line (drawn in draw())
++            return;
++        }
+         if (this.dragging >= 0) {
+             mesh.moveVertex(this.dragging, p.worldX, p.worldY);
+             this.moved = true;
+@@ -169,8 +197,21 @@
+     }
+ 
+     private onUp() {
+-        if (this.dragging >= 0 && this.moved) this.mesh?.retriangulate();
++        const mesh = this.mesh;
++        if (this.linking >= 0 && mesh && this.pointer) {
++            const target = mesh.vertexAt(
++                this.pointer.x,
++                this.pointer.y,
++                12 * Rect.ui,
++            );
++            if (target >= 0 && target !== this.linking) {
++                mesh.addEdge(this.linking, target);
++            }
++        } else if (this.dragging >= 0 && this.moved) {
++            mesh?.retriangulate();
++        }
+         this.dragging = -1;
++        this.linking = -1;
+         this.moved = false;
+         this.painting = false;
+     }
+@@ -195,8 +236,8 @@
+         const ui = Rect.ui;
+         const pts = mesh.vertices.map((v) => mesh.rigidPoint(v));
+ 
+-        // triangles
+-        g.lineStyle(1 * ui, 0xffffff, 0.4);
++        // triangles (faint white)
++        g.lineStyle(1 * ui, 0xffffff, 0.35);
+         for (let t = 0; t < mesh.indices.length; t += 3) {
+             const a = pts[mesh.indices[t]];
+             const b = pts[mesh.indices[t + 1]];
+@@ -209,6 +250,28 @@
+             g.strokePath();
+         }
+ 
++        // forced edges (Spine-style orange)
++        g.lineStyle(2 * ui, 0xff9800, 1);
++        for (const [a, b] of mesh.edges) {
++            const A = pts[a];
++            const B = pts[b];
++            if (!A || !B) continue;
++            g.beginPath();
++            g.moveTo(A.x, A.y);
++            g.lineTo(B.x, B.y);
++            g.strokePath();
++        }
++
++        // ghost edge while Ctrl+dragging
++        if (this.linking >= 0 && this.pointer && pts[this.linking]) {
++            const A = pts[this.linking];
++            g.lineStyle(2 * ui, 0xff9800, 0.6);
++            g.beginPath();
++            g.moveTo(A.x, A.y);
++            g.lineTo(this.pointer.x, this.pointer.y);
++            g.strokePath();
++        }
++
+         // vertices
+         const bone = Bone.active && Bone.active.alive ? Bone.active : null;
+         const hover =
+@@ -220,11 +283,19 @@
+             if (this.tool === "weights") {
+                 const v = mesh.vertices[i];
+                 color = !bone || v.weights.length === 0 ? 0x555555 : heat(mesh.weightOf(i, bone.id));
+-            } else color = mesh.isCornerVertex(i) ? 0xffb300 : i === hover ? 0xffffff : 0x4fc3f7;
++            } else
++                color =
++                    i === this.linking
++                        ? 0xff9800
++                        : mesh.isCornerVertex(i)
++                          ? 0xffb300
++                          : i === hover
++                            ? 0xffffff
++                            : 0x4fc3f7;
+             g.fillStyle(color, 1);
+-            g.fillCircle(p.x, p.y, (i === hover ? 6 : 4.5) * ui);
++            g.fillCircle(p.x, p.y, (i === hover || i === this.linking ? 6 : 4.5) * ui);
+             g.lineStyle(1 * ui, 0x000000, 0.8);
+-            g.strokeCircle(p.x, p.y, (i === hover ? 6 : 4.5) * ui);
++            g.strokeCircle(p.x, p.y, (i === hover || i === this.linking ? 6 : 4.5) * ui);
+         });
+ 
+         // brush
+--- a/src/game/game-components/objects/object-builder.ts	2026-11-18 19:17:20.480000000 +0000
++++ b/src/game/game-components/objects/object-builder.ts	2026-11-18 19:17:20.948000000 +0000
+@@ -55,7 +55,7 @@
+ 
+     /**
+      * A skinned mesh (grid of vertices that can be weighted to multiple bones).
+-     * Texture must already be loaded. Default subdivision is 4×4.
++     * Texture must already be loaded. Default is 1×1 (just the four corners).
+      */
+     mesh(config: mesh_config): Mesh {
+         const mesh = new Mesh(this.scene, config);
+@@ -66,8 +66,9 @@
+     /**
+      * Convert an existing Sprite into a Mesh (same texture, size, placement, bone and layer).
+      * The original Sprite is removed from the scene and the new Mesh takes its place.
++     * Defaults to 1×1 (four corners only) so you can place vertices yourself.
+      */
+-    spriteToMesh(sprite: Sprite, cols = 4, rows = 4): Mesh {
++    spriteToMesh(sprite: Sprite, cols = 1, rows = 1): Mesh {
+         const parent = sprite.parentBone;
+         const store = useObjectsStore.getState();
+         const layer = store.objects.indexOf(sprite);
+--- a/src/components/tab/Inspector.tsx	2026-11-18 19:17:21.251000000 +0000
++++ b/src/components/tab/Inspector.tsx	2026-11-18 19:17:21.508000000 +0000
+@@ -158,10 +158,21 @@
+                         />
+                         Trim transparent areas
+                     </label>
++                    <div className="flex gap-2 justify-end">
++                        <button
++                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
++                            onClick={() => target.resetToCorners()}
++                            title="Remove every extra vertex and keep only the four corners"
++                        >
++                            Reset to corners
++                        </button>
++                    </div>
+                     <div className="text-[11px] text-[#878080]">
+-                        Drag a vertex to move it. Click an empty spot to add
+-                        one (it keeps the weights around it). Shift + click a
+-                        vertex to delete it. The four orange corners stay put.
++                        Place vertices only where you need them (like Spine).
++                        Click empty space to add, drag to move, Shift+click to
++                        delete. Ctrl+drag between vertices to force an edge
++                        (orange). Shift+click an edge to remove it. The four
++                        corner dots stay put.
+                     </div>
+                 </>
+             )}
+@@ -632,18 +643,6 @@
+                         label="Weighted"
+                         value={mesh.hasWeights ? "yes" : "no (rigid)"}
+                     />
+-                    <NumberField
+-                        label="Columns"
+-                        value={mesh.cols}
+-                        disabled={posing}
+-                        onCommit={(v) => mesh.setGrid(v, mesh.rows)}
+-                    />
+-                    <NumberField
+-                        label="Rows"
+-                        value={mesh.rows}
+-                        disabled={posing}
+-                        onCommit={(v) => mesh.setGrid(mesh.cols, v)}
+-                    />
+                     <label className="col-span-2 flex items-center gap-2 text-xs text-[#b5b0b0]">
+                         <input
+                             type="checkbox"
+@@ -673,7 +672,15 @@
+                             Paint weights
+                         </button>
+                     </div>
+-                    <div className="flex gap-2 justify-end">
++                    <div className="col-span-2 flex gap-2 justify-end">
++                        <button
++                            disabled={posing}
++                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
++                            onClick={() => mesh.resetToCorners()}
++                            title="Remove every extra vertex and keep only the four corners"
++                        >
++                            Reset to corners
++                        </button>
+                         <button
+                             disabled={posing || !mesh.hasWeights}
+                             className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+@@ -694,10 +701,35 @@
+                             Auto-weight
+                         </button>
+                     </div>
+-                    <div className="text-[11px] text-[#878080]">
+-                        Auto-weight uses every bone. Changing the grid clears
+-                        the weights. Paint to refine them.
+-                    </div>
++                    <details className="col-span-2 text-[11px] text-[#878080]">
++                        <summary className="cursor-pointer hover:text-[#b5b0b0]">
++                            Optional: uniform grid
++                        </summary>
++                        <div className="mt-1 flex flex-col gap-1">
++                            <div className="grid grid-cols-2 gap-2">
++                                <NumberField
++                                    label="Columns"
++                                    value={mesh.cols}
++                                    disabled={posing}
++                                    onCommit={(v) => mesh.setGrid(v, mesh.rows)}
++                                />
++                                <NumberField
++                                    label="Rows"
++                                    value={mesh.rows}
++                                    disabled={posing}
++                                    onCommit={(v) =>
++                                        mesh.setGrid(mesh.cols, v)
++                                    }
++                                />
++                            </div>
++                            <div>
++                                New meshes start with only the four corners.
++                                Use <b>Edit vertices</b> and click to place
++                                points where you need them (like Spine). A
++                                uniform grid is optional and clears weights.
++                            </div>
++                        </div>
++                    </details>
+                 </Group>
+             )}
+ 

@@ -55,7 +55,7 @@ export class ObjectBuilder {
 
     /**
      * A skinned mesh (grid of vertices that can be weighted to multiple bones).
-     * Texture must already be loaded. Default subdivision is 4×4.
+     * Texture must already be loaded. Default is 1×1 (just the four corners).
      */
     mesh(config: mesh_config): Mesh {
         const mesh = new Mesh(this.scene, config);
@@ -66,8 +66,9 @@ export class ObjectBuilder {
     /**
      * Convert an existing Sprite into a Mesh (same texture, size, placement, bone and layer).
      * The original Sprite is removed from the scene and the new Mesh takes its place.
+     * Defaults to 1×1 (four corners only) so you can place vertices yourself.
      */
-    spriteToMesh(sprite: Sprite, cols = 4, rows = 4): Mesh {
+    spriteToMesh(sprite: Sprite, cols = 1, rows = 1): Mesh {
         const parent = sprite.parentBone;
         const store = useObjectsStore.getState();
         const layer = store.objects.indexOf(sprite);

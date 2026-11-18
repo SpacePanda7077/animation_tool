@@ -46,7 +46,7 @@ export type MeshState = RectState & {
 };
 
 export type mesh_config = sprite_config & {
-    /** grid subdivision (default 4x4) */
+    /** grid subdivision (default 1x1 = just the four corners) */
     cols?: number;
     rows?: number;
 };
@@ -115,8 +115,8 @@ export class Mesh extends Rect {
         this.texScene = scene;
         this.textureKey = config.texture;
         this.name = config.name ?? config.texture;
-        this.cols = clampGrid(config.cols ?? 4);
-        this.rows = clampGrid(config.rows ?? 4);
+        this.cols = clampGrid(config.cols ?? 1);
+        this.rows = clampGrid(config.rows ?? 1);
 
         // invisible, but still there to be clicked
         this.rect.setFillStyle(0xffffff, 0);
@@ -153,6 +153,18 @@ export class Mesh extends Rect {
         if (c === this.cols && r === this.rows) return;
         this.cols = c;
         this.rows = r;
+        this.buildGrid();
+    }
+
+    /**
+     * Throw away every extra vertex and go back to just the four corners.
+     * Use this when the auto grid (or previous edits) left you with vertices you don't want.
+     * Clears weights.
+     */
+    resetToCorners() {
+        if (this.locked) return;
+        this.cols = 1;
+        this.rows = 1;
         this.buildGrid();
     }
 

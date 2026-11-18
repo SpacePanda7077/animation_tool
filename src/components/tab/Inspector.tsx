@@ -158,10 +158,19 @@ function MeshEditPanel() {
                         />
                         Trim transparent areas
                     </label>
+                    <div className="flex gap-2 justify-end">
+                        <button
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1"
+                            onClick={() => target.resetToCorners()}
+                            title="Remove every extra vertex and keep only the four corners"
+                        >
+                            Reset to corners
+                        </button>
+                    </div>
                     <div className="text-[11px] text-[#878080]">
-                        Drag a vertex to move it. Click an empty spot to add
-                        one (it keeps the weights around it). Shift + click a
-                        vertex to delete it. The four orange corners stay put.
+                        Place vertices only where you need them (like Spine).
+                        Click empty space to add, drag to move, Shift+click to
+                        delete. The four orange corners stay put.
                     </div>
                 </>
             )}
@@ -632,18 +641,6 @@ function Properties() {
                         label="Weighted"
                         value={mesh.hasWeights ? "yes" : "no (rigid)"}
                     />
-                    <NumberField
-                        label="Columns"
-                        value={mesh.cols}
-                        disabled={posing}
-                        onCommit={(v) => mesh.setGrid(v, mesh.rows)}
-                    />
-                    <NumberField
-                        label="Rows"
-                        value={mesh.rows}
-                        disabled={posing}
-                        onCommit={(v) => mesh.setGrid(mesh.cols, v)}
-                    />
                     <label className="col-span-2 flex items-center gap-2 text-xs text-[#b5b0b0]">
                         <input
                             type="checkbox"
@@ -673,7 +670,15 @@ function Properties() {
                             Paint weights
                         </button>
                     </div>
-                    <div className="flex gap-2 justify-end">
+                    <div className="col-span-2 flex gap-2 justify-end">
+                        <button
+                            disabled={posing}
+                            className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
+                            onClick={() => mesh.resetToCorners()}
+                            title="Remove every extra vertex and keep only the four corners"
+                        >
+                            Reset to corners
+                        </button>
                         <button
                             disabled={posing || !mesh.hasWeights}
                             className="text-xs rounded bg-[#4c4747] hover:bg-[#5d5757] text-white px-2 py-1 disabled:opacity-40"
@@ -694,10 +699,35 @@ function Properties() {
                             Auto-weight
                         </button>
                     </div>
-                    <div className="text-[11px] text-[#878080]">
-                        Auto-weight uses every bone. Changing the grid clears
-                        the weights. Paint to refine them.
-                    </div>
+                    <details className="col-span-2 text-[11px] text-[#878080]">
+                        <summary className="cursor-pointer hover:text-[#b5b0b0]">
+                            Optional: uniform grid
+                        </summary>
+                        <div className="mt-1 flex flex-col gap-1">
+                            <div className="grid grid-cols-2 gap-2">
+                                <NumberField
+                                    label="Columns"
+                                    value={mesh.cols}
+                                    disabled={posing}
+                                    onCommit={(v) => mesh.setGrid(v, mesh.rows)}
+                                />
+                                <NumberField
+                                    label="Rows"
+                                    value={mesh.rows}
+                                    disabled={posing}
+                                    onCommit={(v) =>
+                                        mesh.setGrid(mesh.cols, v)
+                                    }
+                                />
+                            </div>
+                            <div>
+                                New meshes start with only the four corners.
+                                Use <b>Edit vertices</b> and click to place
+                                points where you need them (like Spine). A
+                                uniform grid is optional and clears weights.
+                            </div>
+                        </div>
+                    </details>
                 </Group>
             )}
 
